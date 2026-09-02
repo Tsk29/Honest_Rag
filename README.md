@@ -159,3 +159,50 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [Streamlit](https://streamlit.io/) for the web interface
 - [Milvus](https://milvus.io/) for vector storage
 
+## Evaluation
+
+The Corrective RAG behavior in this app hinges on one judgment: for each
+retrieved document chunk, the relevance grader (`DEFAULT_RELEVANCY_PROMPT_TEMPLATE`
+in `workflow.py`) decides "yes" or "no" on whether that chunk is actually
+relevant to the user's question. That decision determines whether the app
+trusts local retrieval or falls back to a Firecrawl web search - it's the
+single most trust-critical judgment in the pipeline, and until now there was
+no measurement of how good it actually is.
+
+`eval/` contains a small evaluation harness for that grader:
+
+- `eval/dataset.jsonl` - ~20 hand-written labeled examples (`query`,
+  `document_chunk`, `label`), including obviously relevant/irrelevant cases
+  and several deliberately tricky near-misses (chunks that share keywords
+  with the query but don't actually answer it, or are topically adjacent but
+  not on-point). The easy cases don't tell you much about grader quality -
+  the near-misses do.
+- `eval/run_eval.py` - loads the dataset, imports the real
+  `DEFAULT_RELEVANCY_PROMPT_TEMPLATE` from `workflow.py` (never reimplements
+  it), runs it through an LLM, parses yes/no the same way the workflow does
+  (including stripping `<think>` blocks), and reports precision, recall, F1,
+  and accuracy - plus prints every misclassified example so you can see
+  *which* cases the grader gets wrong, not just an aggregate score.
+
+### Running it for real
+
+```bash
+OPENAI_API_KEY="your_openai_api_key_here" python eval/run_eval.py
+```
+
+Optional flags: `--model` (default `gpt-4o`) and `--dataset` to point at a
+different labeled file.
+
+### Mock mode
+
+```bash
+python eval/run_eval.py --mock
+```
+
+`--mock` (also triggered automatically if `OPENAI_API_KEY` isn't set) swaps
+in a crude deterministic keyword-overlap heuristic instead of a real LLM
+call. It exists solely so the harness's own plumbing - dataset loading,
+prompt formatting, and metrics computation - can be verified without an API
+key. Mock-mode numbers say nothing about the real grader's quality; only a
+run with a real `OPENAI_API_KEY` is a meaningful evaluation.
+
