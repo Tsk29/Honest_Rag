@@ -1,16 +1,18 @@
 # HonestRAG
 
 A Corrective RAG (Retrieval-Augmented Generation) system that doesn't just trust
-its own retrieval. It grades the relevance of what it pulled from your
-documents, and automatically falls back to a live web search (via Firecrawl)
-whenever that retrieval isn't good enough to answer confidently - then
-generates a streamed, cited answer from whichever sources actually deserved
-to be used.
+its own retrieval - or its own answer. It grades the relevance of what it
+pulled from your documents, falls back to a live web search (via Firecrawl)
+whenever that retrieval isn't good enough to answer confidently, then
+fact-checks its own finished answer against the context it used before
+showing it to you, with the exact source snippet behind every claim one
+click away.
 
 *Originally forked from [patchy631/ai-engineering-hub's firecrawl-agent](https://github.com/patchy631/ai-engineering-hub/tree/main/firecrawl-agent),
 then substantially rebuilt: concurrent relevance grading, a confidence-tiered
-web-search trigger, source citations, real token streaming, a Groq-backed LLM
-layer, multi-document persistent indexing with per-source removal, a
+web-search trigger, a self-critique pass on every answer, per-snippet source
+citations, real token streaming, a pluggable LLM layer (Groq / local Ollama /
+OpenAI), multi-document persistent indexing with per-source removal, a
 relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 
 ## Features
@@ -34,10 +36,17 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 **Answers you can verify**
 - Real token-by-token streaming as the LLM generates (not a fake post-hoc
   reveal) via `llm.astream_complete()`
-- Every answer is tagged with the sources it actually drew on - "Uploaded
-  source" and/or the specific web URL(s) - shown as citation chips
-- Runs on Groq by default (fast, generous free tier), swappable for OpenAI,
-  Ollama, or LMStudio
+- Every answer is tagged with the sources it actually drew on; each citation
+  expands to the **exact retrieved snippet** it corresponds to - a specific
+  document chunk or web result - not a generic "Uploaded source" label
+- A **self-critique pass** re-checks the finished answer against that same
+  context for claims it doesn't actually support, as an independent LLM call
+  after the answer is generated - not the model grading its own homework in
+  the same breath. Shown as a "✓ Claims checked" badge, or an expandable
+  warning naming the specific unsupported claim(s) if the check fails
+- Runs on Groq by default (fast, generous free tier); switch to a fully local
+  model (e.g. Qwen2.5 via Ollama) or OpenAI with one environment variable -
+  see [Choosing an LLM provider](#choosing-an-llm-provider)
 
 **Interface**
 - Streamlit UI restyled in a NotebookLM-inspired layout: dark theme, a
@@ -61,8 +70,11 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
    live web search
 4. **Generate** - the LLM answers from whichever context survived (document,
    web, or both), streaming tokens back as they're produced
-5. **Cite** - the answer is returned with the specific sources it drew on, so
-   you can check its work
+5. **Critique** - once the answer is complete, a second, independent LLM call
+   checks it against that same context for unsupported claims
+6. **Cite** - the answer is returned with the specific sources - and exact
+   snippets - it drew on, plus the critique verdict, so you can check its
+   work instead of taking it on faith
 
 ![Workflow Architecture](assets/animation.gif)
 
@@ -71,7 +83,7 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 | Layer | Choice |
 |---|---|
 | RAG framework | [LlamaIndex](https://github.com/run-llama/llama_index) (Workflow-based orchestration) |
-| LLM | [Groq](https://groq.com/) by default (also OpenAI / Ollama / LMStudio) |
+| LLM | [Groq](https://groq.com/) by default; [Ollama](https://ollama.com/) (local) or OpenAI via `LLM_PROVIDER` |
 | Web search | [Firecrawl](https://firecrawl.dev/) |
 | Vector store | [Milvus](https://milvus.io/) (Milvus Lite, local file-based) |
 | Embeddings | [FastEmbed](https://github.com/qdrant/fastembed) (`BAAI/bge-large-en-v1.5`) |
@@ -83,8 +95,9 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 
 - Python 3.11+
 - A [Firecrawl](https://firecrawl.dev/) API key
-- A [Groq](https://console.groq.com/) API key (or another provider - see
-  `load_llm()` in `app.py`)
+- A [Groq](https://console.groq.com/) API key, **or** a locally running
+  [Ollama](https://ollama.com/) instance if you'd rather not use an API key
+  at all - see [Choosing an LLM provider](#choosing-an-llm-provider)
 
 ### 1. Install dependencies
 
@@ -113,6 +126,36 @@ Groq's available model lineup changes fairly often - if `GROQ_MODEL` starts
 erroring out as deprecated, check what's currently live at
 `https://api.groq.com/openai/v1/models`.
 
+### Choosing an LLM provider
+
+Both the answer-generation LLM and the relevance grader are built through a
+single factory (`llm_provider.py`), switched with one variable:
+
+```bash
+LLM_PROVIDER=groq     # default - needs GROQ_API_KEY, GROQ_MODEL optional
+LLM_PROVIDER=ollama   # fully local - needs a running `ollama serve`
+LLM_PROVIDER=openai   # needs OPENAI_API_KEY, OPENAI_MODEL optional (default gpt-4o)
+```
+
+**Running fully local with Qwen (or any other Ollama model):**
+
+```bash
+ollama pull qwen2.5:7b        # or qwen2.5-coder:1.5b for a smaller/faster pull
+```
+
+```bash
+LLM_PROVIDER=ollama
+OLLAMA_MODEL="qwen2.5:7b"        # optional, defaults to qwen2.5-coder:1.5b
+OLLAMA_BASE_URL="http://localhost:11434"  # optional, this is the default
+```
+
+No API key needed for this path - everything (retrieval grading, web-search
+query rewriting, answer generation, self-critique) runs against your local
+Ollama server instead. Expect it to be slower and less reliable at following
+the grading/critique prompts than Groq's larger hosted models, especially
+with a small model like `qwen2.5-coder:1.5b` - but it costs nothing and needs
+no network access beyond Firecrawl's web-search fallback.
+
 ### 3. Run it
 
 ```bash
@@ -127,7 +170,8 @@ PDF or two in the Sources panel, and start asking questions.
 ```
 Honestrag/
 ├── app.py                 # Streamlit UI: sources panel, chat, streaming
-├── workflow.py             # CorrectiveRAGWorkflow: retrieve/grade/search/answer
+├── workflow.py             # CorrectiveRAGWorkflow: retrieve/grade/search/answer/critique
+├── llm_provider.py          # Shared LLM factory (Groq / Ollama / OpenAI)
 ├── eval/
 │   ├── dataset.jsonl        # Labeled examples for the relevance grader
 │   └── run_eval.py          # Precision/recall/F1 harness for the grader
@@ -139,12 +183,16 @@ Honestrag/
 
 ## Configuration
 
-- **LLM**: set via `GROQ_API_KEY` / `GROQ_MODEL` in `.env`; swap providers by
-  editing `load_llm()` in `app.py` and the matching default in `workflow.py`
+- **LLM provider**: `LLM_PROVIDER` in `.env` (`groq` / `ollama` / `openai`) -
+  see [Choosing an LLM provider](#choosing-an-llm-provider); resolved once in
+  `llm_provider.py` and used by both the UI and the workflow
 - **Relevance threshold**: `CorrectiveRAGWorkflow.RELEVANCE_TRIGGER_THRESHOLD`
   in `workflow.py` (default `0.7`) - the minimum fraction of retrieved chunks
   that must grade "relevant" before local retrieval is trusted without a web
   search
+- **Self-critique**: always on, adds one extra (non-streamed) LLM call after
+  each answer; see `_critique_answer()` in `workflow.py` to disable or adjust
+  its prompt
 - **Embedding model**: FastEmbed, `BAAI/bge-large-en-v1.5` by default
 - **Vector store location**: `./milvus_demo.db` (gitignored - local only)
 

@@ -14,7 +14,7 @@ from llama_index.core.workflow import (
 from llama_index.core import SummaryIndex
 from llama_index.core.schema import Document
 from llama_index.core.prompts import PromptTemplate
-from llama_index.llms.groq import Groq
+from llm_provider import build_llm
 from llama_index.core.llms import LLM
 from llama_index.core.base.base_retriever import BaseRetriever
 from typing import List
@@ -38,13 +38,15 @@ class RetrieveEvent(Event):
 class WebSearchEvent(Event):
     """Web search event."""
 
-    relevant_text: str  # not used, just used for pass through
+    relevant_chunks: List[str]  # not used, just used for pass through
 
 
 class QueryEvent(Event):
-    """Query event. Queries given relevant text and search text."""
+    """Query event. Queries given the individually-graded relevant chunks
+    (kept as a list, not pre-joined, so query_result() can cite each one
+    separately) and the web search text."""
 
-    relevant_text: str
+    relevant_chunks: List[str]
     search_text: str
 
 
@@ -117,6 +119,27 @@ DEFAULT_TRANSFORM_QUERY_TEMPLATE = PromptTemplate(
     Respond with the optimized query only:"""
 )
 
+DEFAULT_CRITIQUE_PROMPT_TEMPLATE = PromptTemplate(
+    template="""You are fact-checking an AI-generated answer against the context it was supposed to be based on.
+
+    Context:
+    -------------------
+    {context_str}
+
+    Answer to check:
+    -------------------
+    {answer}
+
+    Task: identify any factual claims in the answer that are NOT supported by
+    the context above - fabricated, unsupported, or contradicted. Reasonable
+    synthesis, summarization, or rephrasing of what the context says is fine;
+    only flag claims the context does not actually back up.
+
+    If every claim is supported, respond with exactly: SUPPORTED
+    Otherwise, respond with a short bullet list of the specific unsupported
+    claims and nothing else."""
+)
+
 
 class CorrectiveRAGWorkflow(Workflow):
     """Corrective RAG Workflow."""
@@ -143,18 +166,7 @@ class CorrectiveRAGWorkflow(Workflow):
         self.index = index
         self.firecrawl_api_key = firecrawl_api_key
         
-        if llm is not None:
-            self.llm = llm
-        else:
-            # self.llm = Ollama(
-            #     model="gemma3:4b",
-            #     base_url="http://localhost:11434",
-            #     temperature=0.1,
-            # )
-            self.llm = Groq(
-                model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
-                api_key=os.getenv("GROQ_API_KEY"),
-            )
+        self.llm = llm if llm is not None else build_llm()
         
         # Set the global LLM settings to avoid conflicts
         from llama_index.core import Settings
@@ -248,10 +260,9 @@ class CorrectiveRAGWorkflow(Workflow):
             for i, result in enumerate(relevancy_results_striped)
             if "yes" in result.lower()
         ]
-        relevant_text = "\n".join(relevant_texts)
-
         print(f"DEBUG: Relevant texts count: {len(relevant_texts)}")
-        print(f"DEBUG: Relevant text preview: {relevant_text[:200]}...")
+        if relevant_texts:
+            print(f"DEBUG: First relevant text preview: {relevant_texts[0][:200]}...")
 
         # Confidence-tiered decision (CRAG-style) instead of a binary "any
         # node graded 'no' triggers a full web search": only fall back to
@@ -267,10 +278,10 @@ class CorrectiveRAGWorkflow(Workflow):
 
         if relevant_fraction < self.RELEVANCE_TRIGGER_THRESHOLD:
             print("DEBUG: Relevant fraction below threshold, returning WebSearchEvent")
-            return WebSearchEvent(relevant_text=relevant_text)
+            return WebSearchEvent(relevant_chunks=relevant_texts)
         else:
             print("DEBUG: Relevant fraction meets threshold, returning QueryEvent")
-            return QueryEvent(relevant_text=relevant_text, search_text="")
+            return QueryEvent(relevant_chunks=relevant_texts, search_text="")
 
     def _firecrawl_search(self, query: str, limit: int = 5) -> str:
         """Perform web search using FireCrawl API directly."""
@@ -349,11 +360,13 @@ class CorrectiveRAGWorkflow(Workflow):
         if search_text:
             print(f"DEBUG: web_search - search results preview: {search_text[:200]}...")
 
-        return QueryEvent(relevant_text=ev.relevant_text, search_text=search_text)
+        return QueryEvent(relevant_chunks=ev.relevant_chunks, search_text=search_text)
 
     @step
     async def query_result(self, ctx: Context, ev: QueryEvent) -> StopEvent:
-        """Generate the final answer, streaming it and tagging its sources.
+        """Generate the final answer, streaming it, tagging its sources with
+        the exact chunk each one contributed, and fact-checking the finished
+        answer against that same context.
 
         The context handed to the LLM is tagged per-source ("[Document Source]"
         for retrieved text, "[Web Source: <url>]" per web result - the latter
@@ -361,8 +374,9 @@ class CorrectiveRAGWorkflow(Workflow):
         its answer with a "Sources:" section naming what it actually used.
         We also independently track which sources were *available* (not just
         what the model claims to have used) and return them alongside the
-        answer, so app.py has a reliable list to show even if the model's
-        own citation section is incomplete.
+        answer, each carrying the exact snippet it corresponds to - not just
+        a generic "Uploaded source" label - so app.py can show the user
+        precisely what backed a claim instead of asking them to trust it.
 
         The answer itself is generated with `llm.astream_complete()` so tokens
         can be pushed to the caller as they arrive via
@@ -371,38 +385,53 @@ class CorrectiveRAGWorkflow(Workflow):
         `handler.stream_events()`. Workflow.run() only resolves once a
         StopEvent is produced, so the full assembled text is also returned
         there for callers that just want the final answer.
+
+        After the answer is fully generated, one more (non-streamed) LLM call
+        re-checks it against the same context for claims the context doesn't
+        actually support - a lightweight self-critique pass, separate from
+        the relevance grading that decided what context to use in the first
+        place. It never blocks or rewrites the answer, only annotates it:
+        the point is to surface doubt, not to silently hide it.
         """
-        relevant_text = ev.relevant_text
+        relevant_chunks = ev.relevant_chunks
         search_text = ev.search_text
         query_str = await ctx.get("query_str")
 
         print(f"DEBUG: query_result - query_str: {query_str}")
-        print(f"DEBUG: query_result - relevant_text: {relevant_text}")
+        print(f"DEBUG: query_result - relevant_chunks: {len(relevant_chunks)}")
         print(f"DEBUG: query_result - search_text: {search_text}")
 
-        if not relevant_text.strip() and not search_text.strip():
+        if not relevant_chunks and not search_text.strip():
             print("DEBUG: No relevant text, returning empty response")
             return StopEvent(
                 result={
                     "answer": "No relevant information found in the documents.",
                     "sources": [],
+                    "critique": None,
                 }
             )
 
         context_parts = []
         sources: list[dict] = []
 
-        if relevant_text.strip():
-            context_parts.append(f"[Document Source]\n{relevant_text.strip()}")
-            sources.append({"type": "document"})
+        if relevant_chunks:
+            context_parts.append(
+                "[Document Source]\n" + "\n\n".join(c.strip() for c in relevant_chunks)
+            )
+            for chunk in relevant_chunks:
+                sources.append({"type": "document", "text": chunk.strip()})
 
         if search_text.strip():
             context_parts.append(search_text.strip())
             seen_urls = set()
-            for url in re.findall(r"\[Web Source:\s*(\S+)\]", search_text):
+            for block in search_text.split("\n\n"):
+                match = re.match(r"\[Web Source:\s*(\S+)\]\n(.*)", block.strip(), re.DOTALL)
+                if not match:
+                    continue
+                url, text = match.group(1), match.group(2)
                 if url not in seen_urls:
                     seen_urls.add(url)
-                    sources.append({"type": "web", "url": url})
+                    sources.append({"type": "web", "url": url, "text": text.strip()})
 
         context_str = "\n\n".join(context_parts)
 
@@ -450,4 +479,35 @@ class CorrectiveRAGWorkflow(Workflow):
                 ctx.write_event_to_stream(TokenEvent(delta=full_response))
 
         print(f"DEBUG: query_result - final result: {full_response}")
-        return StopEvent(result={"answer": full_response, "sources": sources})
+
+        critique = await self._critique_answer(context_str, full_response)
+
+        return StopEvent(result={"answer": full_response, "sources": sources, "critique": critique})
+
+    async def _critique_answer(self, context_str: str, answer: str) -> Optional[dict]:
+        """Fact-check the finished answer against the same context it was
+        generated from, and return `{"passed": bool, "note": str | None}` -
+        or None if the check itself couldn't be run (never let a critique
+        failure take down the answer that already streamed to the user).
+
+        Deliberately a separate, non-streamed call after the answer is
+        complete rather than folded into the generation prompt: asking a
+        model to write an answer and grade its own answer in the same
+        breath is much less reliable than a second, independent pass.
+        """
+        if not answer.strip():
+            return None
+        try:
+            prompt = DEFAULT_CRITIQUE_PROMPT_TEMPLATE.format(context_str=context_str, answer=answer)
+            try:
+                result = await self.llm.acomplete(prompt)
+            except Exception:
+                result = self.llm.complete(prompt)
+            critique_text = re.sub(r"<think>.*?</think>", "", result.text, flags=re.DOTALL).strip()
+        except Exception as e:
+            print(f"DEBUG: critique pass failed ({e!r}), skipping")
+            return None
+
+        passed = not critique_text or critique_text.upper().startswith("SUPPORTED")
+        print(f"DEBUG: critique - passed={passed} text={critique_text[:200]}")
+        return {"passed": passed, "note": None if passed else critique_text}

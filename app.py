@@ -6,7 +6,7 @@ from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.core import StorageContext
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
-from llama_index.llms.groq import Groq
+from llm_provider import build_llm
 import uuid
 import tempfile
 import gc
@@ -299,14 +299,11 @@ if "workflow_logs" not in st.session_state:
 session_id = st.session_state.id
 
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-
-
 @st.cache_resource
 def load_llm():
-
-    llm = Groq(model=GROQ_MODEL, api_key=os.getenv("GROQ_API_KEY"))
-    return llm
+    # Provider is picked by LLM_PROVIDER ("groq" default, "ollama" for a
+    # fully local model such as Qwen2.5, "openai") - see llm_provider.py.
+    return build_llm()
 
 
 def reset_chat():
@@ -680,30 +677,47 @@ if prompt := st.chat_input("Ask a question about your documents..."):
                 if isinstance(result, dict):
                     answer_text = result.get("answer", "")
                     sources = result.get("sources", [])
+                    critique = result.get("critique")
                 elif hasattr(result, "response"):
                     answer_text = result.response
                     sources = []
+                    critique = None
                 else:
                     answer_text = str(result)
                     sources = []
+                    critique = None
 
                 # Prefer the structured answer; fall back to whatever was
                 # streamed if for some reason the final text came back empty.
                 full_response = answer_text or streamed_text["value"]
                 message_placeholder.markdown(full_response)
 
+                # Each source is shown as its exact retrieved snippet, not a
+                # generic "Uploaded source" label - collapsed by default so
+                # the answer stays the focus, but one click away from
+                # checking precisely what backed it.
                 if sources:
-                    chips = []
+                    doc_n = 0
                     for source in sources:
                         if source.get("type") == "document":
-                            chips.append('<span class="nb-source-card">📄 Uploaded source</span>')
-                        elif source.get("type") == "web":
-                            chips.append(f'<span class="nb-source-card">🌐 {source.get("url")}</span>')
-                    if chips:
-                        st.markdown(
-                            f'<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">{"".join(chips)}</div>',
-                            unsafe_allow_html=True,
-                        )
+                            doc_n += 1
+                            label = f"📄 Uploaded source {doc_n}" if len([s for s in sources if s.get("type") == "document"]) > 1 else "📄 Uploaded source"
+                        else:
+                            label = f'🌐 {source.get("url")}'
+                        with st.expander(label, expanded=False):
+                            st.caption(source.get("text", ""))
+
+                # Self-critique verdict: a second, independent LLM pass that
+                # checked the finished answer against the same context for
+                # unsupported claims. Silent when it couldn't run at all
+                # (e.g. transient API error) rather than implying a result
+                # that was never actually computed.
+                if critique is not None:
+                    if critique.get("passed"):
+                        st.caption("✓ Claims checked against sources")
+                    else:
+                        with st.expander("⚠️ Some claims may not be fully supported by sources", expanded=False):
+                            st.caption(critique.get("note", ""))
 
         except Exception as e:
             st.error(f"Error running workflow: {e}")
