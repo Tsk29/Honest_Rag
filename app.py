@@ -40,6 +40,9 @@ st.set_page_config(page_title="HonestRAG", layout="wide", page_icon="📓")
 # and a restrained blue accent. This only reskins existing Streamlit
 # components via their stable data-testid hooks - no layout logic changes.
 st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600&family=Google+Sans+Text&display=swap" rel="stylesheet">
 <style>
     :root {
         --nb-bg: #131314;
@@ -51,13 +54,25 @@ st.markdown("""
         --nb-accent: #a8c7fa;
     }
 
-    html, body, [class*="css"] { font-family: "Google Sans", "Segoe UI", Roboto, system-ui, sans-serif; }
+    html, body, [class*="css"] { font-family: "Google Sans Text", Roboto, "Segoe UI", system-ui, sans-serif; }
     .stApp { background: var(--nb-bg); }
+
+    /* Center the workspace in a comfortable reading width instead of
+       stretching chat bubbles across the full wide-layout viewport. */
+    .main .block-container {
+        max-width: 900px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
 
     /* Sidebar -> Sources rail */
     section[data-testid="stSidebar"] {
         background: var(--nb-surface);
         border-right: 1px solid var(--nb-border);
+        width: 320px !important;
+    }
+    section[data-testid="stSidebar"] > div {
+        padding: 1.25rem 1rem;
     }
     section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
         color: var(--nb-text);
@@ -66,6 +81,10 @@ st.markdown("""
         letter-spacing: 0.02em;
         text-transform: uppercase;
         opacity: 0.75;
+        margin-bottom: 0.75rem;
+    }
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.4rem;
     }
 
     /* Upload dropzone as a rounded, dashed "add source" card */
@@ -90,7 +109,7 @@ st.markdown("""
         color: var(--nb-accent);
     }
 
-    /* Source cards inside the Knowledge base list */
+    /* Source cards inside the Sources list */
     .nb-source-card {
         display: flex;
         align-items: center;
@@ -99,11 +118,46 @@ st.markdown("""
         border: 1px solid var(--nb-border);
         border-radius: 10px;
         padding: 8px 12px;
-        margin-bottom: 6px;
         font-size: 0.85rem;
         color: var(--nb-text);
+        height: 100%;
+        box-sizing: border-box;
     }
     .nb-source-card .nb-icon { opacity: 0.8; }
+    .nb-source-info {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+    }
+    .nb-source-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .nb-source-meta {
+        font-size: 0.72rem;
+        color: var(--nb-text-dim);
+    }
+
+    /* Per-source remove ("x") button: compact and quiet, not a full pill */
+    section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+        align-items: stretch;
+        gap: 4px;
+        margin-bottom: 6px;
+    }
+    section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] .stButton > button {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        padding: 0;
+        color: var(--nb-text-dim);
+        font-size: 1rem;
+    }
+    section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] .stButton > button:hover {
+        color: #f28b82;
+        border-color: #f28b82;
+    }
 
     /* Chat input as a floating rounded bar */
     [data-testid="stChatInput"] textarea {
@@ -172,21 +226,31 @@ st.markdown("""
 
 
 def load_indexed_docs():
-    """Read the list of filenames already indexed into the persistent Milvus
-    store, so the sidebar can show the real knowledge base contents even
-    after an app restart."""
+    """Read the metadata (name, size, page count) of every source already
+    indexed into the persistent Milvus store, so the sidebar can show the
+    real knowledge base contents even after an app restart.
+
+    Each entry is `{"name": ..., "size_kb": ..., "pages": ...}`. Older
+    manifests written before size/page tracking existed are just a list of
+    filenames - those are upgraded in place to the dict form with unknown
+    size/pages, rather than discarded.
+    """
     if os.path.exists(KB_MANIFEST_PATH):
         try:
             with open(KB_MANIFEST_PATH, "r") as f:
-                return json.load(f)
+                raw = json.load(f)
         except (OSError, json.JSONDecodeError):
             return []
+        return [
+            entry if isinstance(entry, dict) else {"name": entry, "size_kb": None, "pages": None}
+            for entry in raw
+        ]
     return []
 
 
-def save_indexed_docs(names):
+def save_indexed_docs(docs):
     with open(KB_MANIFEST_PATH, "w") as f:
-        json.dump(names, f)
+        json.dump(docs, f)
 
 
 def clear_knowledge_base():
@@ -202,6 +266,7 @@ def clear_knowledge_base():
     st.session_state.indexed_docs = []
     st.session_state.messages = []
     st.session_state.workflow_logs = []
+    st.session_state.uploader_key += 1
 
 
 # Initialize session state variables
@@ -215,6 +280,15 @@ if "indexed_docs" not in st.session_state:
     # Bootstrapped from disk so a restarted session immediately knows what's
     # already in the knowledge base, instead of assuming it's empty.
     st.session_state.indexed_docs = load_indexed_docs()
+
+if "uploader_key" not in st.session_state:
+    # Bumped whenever a source is removed (individually or via "Clear
+    # knowledge base") so the file_uploader widget below is recreated with a
+    # fresh key. Streamlit's uploader otherwise keeps holding the browser's
+    # file selection across reruns - without this, a just-removed file would
+    # still show up in `uploaded_files` on the very next rerun and get
+    # silently re-indexed right back in.
+    st.session_state.uploader_key = 0
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -291,16 +365,34 @@ def _build_workflow(index, llm):
     return workflow
 
 
-def add_documents_to_index(file_path, new_filenames):
+def add_documents_to_index(file_path, new_file_sizes):
     """Embed and insert the documents found under `file_path` into the
     persistent knowledge base, then rebuild the workflow so it can retrieve
-    across every document indexed so far (not just this batch)."""
+    across every document indexed so far (not just this batch).
+
+    `new_file_sizes` is `{filename: size_in_bytes}` for the files just
+    written to `file_path`, used only to enrich the sidebar's source list.
+    """
     try:
         with st.spinner("Loading documents and updating the knowledge base..."):
             documents = SimpleDirectoryReader(file_path).load_data()
             print(f"DEBUG: Loaded {len(documents)} documents")
+
+            # SimpleDirectoryReader derives each Document's doc_id from the
+            # temp upload path, which is deleted right after this call -
+            # useless for referencing a specific source later (e.g. to
+            # remove it). Overwriting it with the original filename gives
+            # every node from this file a stable, human-meaningful
+            # ref_doc_id that `remove_document()` can target directly.
+            # A single PDF commonly loads as one Document per page, so this
+            # also doubles as a page count per file.
+            page_counts: dict[str, int] = {}
             for i, doc in enumerate(documents):
                 print(f"DEBUG: Document {i} preview: {doc.text[:100]}...")
+                original_name = doc.metadata.get("file_name", "")
+                if original_name:
+                    doc.doc_id = original_name
+                    page_counts[original_name] = page_counts.get(original_name, 0) + 1
 
             vector_store, embed_model, llm = _build_settings_and_store()
             print("DEBUG: Milvus vector store ready (persistent, not overwritten)")
@@ -325,15 +417,49 @@ def add_documents_to_index(file_path, new_filenames):
             workflow = _build_workflow(index, llm)
             st.session_state.workflow = workflow
 
-            for name in new_filenames:
-                if name not in st.session_state.indexed_docs:
-                    st.session_state.indexed_docs.append(name)
+            existing_names = {d["name"] for d in st.session_state.indexed_docs}
+            for name, size_bytes in new_file_sizes.items():
+                if name not in existing_names:
+                    st.session_state.indexed_docs.append({
+                        "name": name,
+                        "size_kb": round(size_bytes / 1024),
+                        "pages": page_counts.get(name),
+                    })
             save_indexed_docs(st.session_state.indexed_docs)
 
             return workflow
     except Exception as e:
         st.error(f"Failed to update the knowledge base: {e}")
         raise e
+
+
+def remove_document(name: str):
+    """Remove a single source from the persistent knowledge base without
+    touching any other indexed document, using the stable ref_doc_id
+    (the original filename) `add_documents_to_index` assigns at index time.
+    """
+    vector_store, embed_model, llm = _build_settings_and_store()
+    vector_store.delete(ref_doc_id=name)
+
+    st.session_state.indexed_docs = [
+        d for d in st.session_state.indexed_docs if d["name"] != name
+    ]
+    save_indexed_docs(st.session_state.indexed_docs)
+
+    # Force the file_uploader to remount empty - see the uploader_key
+    # comment above - otherwise the just-removed file is still sitting in
+    # the widget's selection and gets treated as "new" on the next rerun.
+    st.session_state.uploader_key += 1
+
+    if st.session_state.indexed_docs:
+        try:
+            index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+            st.session_state.workflow = _build_workflow(index, llm)
+        except Exception as e:
+            st.session_state.workflow = None
+            st.sidebar.warning(f"Could not rebuild the workflow after removing a source: {e}")
+    else:
+        st.session_state.workflow = None
 
 
 def resume_workflow_from_existing_store():
@@ -415,12 +541,14 @@ with st.sidebar:
     uploaded_files = st.file_uploader(
         "Add source", type="pdf", accept_multiple_files=True,
         label_visibility="collapsed",
+        key=f"uploader_{st.session_state.uploader_key}",
     )
 
     if uploaded_files:
         # The uploader re-sends every currently-selected file on each rerun,
         # so only process the ones not already in the knowledge base.
-        new_files = [f for f in uploaded_files if f.name not in st.session_state.indexed_docs]
+        existing_names = {d["name"] for d in st.session_state.indexed_docs}
+        new_files = [f for f in uploaded_files if f.name not in existing_names]
 
         if new_files:
             try:
@@ -431,7 +559,7 @@ with st.sidebar:
                             out_file.write(f.getvalue())
 
                     st.caption(f"Indexing {len(new_files)} new source(s)...")
-                    add_documents_to_index(temp_dir, [f.name for f in new_files])
+                    add_documents_to_index(temp_dir, {f.name: f.size for f in new_files})
             except Exception as e:
                 st.error(f"An error occurred: {e}")
                 st.stop()
@@ -440,12 +568,29 @@ with st.sidebar:
 
     if st.session_state.indexed_docs:
         st.caption(f"{len(st.session_state.indexed_docs)} source(s)")
-        for name in st.session_state.indexed_docs:
-            st.markdown(
-                f'<div class="nb-source-card"><span class="nb-icon">📄</span>'
-                f'<span>{name}</span></div>',
-                unsafe_allow_html=True,
-            )
+        for doc in st.session_state.indexed_docs:
+            meta_bits = []
+            if doc.get("size_kb"):
+                meta_bits.append(f'{doc["size_kb"]} KB')
+            if doc.get("pages"):
+                meta_bits.append(f'{doc["pages"]} page{"s" if doc["pages"] != 1 else ""}')
+            meta_text = " · ".join(meta_bits)
+
+            row_col, remove_col = st.columns([5, 1])
+            with row_col:
+                st.markdown(
+                    f'<div class="nb-source-card">'
+                    f'<span class="nb-icon">📄</span>'
+                    f'<span class="nb-source-info">'
+                    f'<span class="nb-source-name">{doc["name"]}</span>'
+                    + (f'<span class="nb-source-meta">{meta_text}</span>' if meta_text else '')
+                    + '</span></div>',
+                    unsafe_allow_html=True,
+                )
+            with remove_col:
+                if st.button("×", key=f"remove_{doc['name']}", help=f"Remove {doc['name']}"):
+                    remove_document(doc["name"])
+                    st.rerun()
     else:
         st.caption("No sources yet. Add a PDF above to get started.")
 
