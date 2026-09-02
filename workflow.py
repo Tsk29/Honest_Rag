@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Any
 import re
+import asyncio
 import requests
 
 from llama_index.core.workflow import (
@@ -84,6 +85,16 @@ DEFAULT_TRANSFORM_QUERY_TEMPLATE = PromptTemplate(
 class CorrectiveRAGWorkflow(Workflow):
     """Corrective RAG Workflow."""
 
+    # Minimum fraction of retrieved nodes that must be graded "yes" (relevant)
+    # before we trust local retrieval alone. This mirrors the CRAG paper's
+    # tiered decision (mostly-relevant -> answer directly, mostly-irrelevant
+    # -> web search, mixed -> a blend) instead of triggering a full web
+    # search the moment a single node out of many is graded "no". 0.7 was
+    # picked as a starting point that tolerates a minority of noisy/irrelevant
+    # chunks (common with naive top-k retrieval) while still catching cases
+    # where retrieval genuinely missed the topic. Tune as needed.
+    RELEVANCE_TRIGGER_THRESHOLD = 0.7
+
     def __init__(
         self,
         index,
@@ -139,6 +150,31 @@ class CorrectiveRAGWorkflow(Workflow):
         await ctx.set("query_str", query_str)
         return RetrieveEvent(retrieved_nodes=result)
 
+    async def _grade_node_relevance(self, i: int, node, query_str: str) -> str:
+        """Grade a single retrieved node's relevance to the query.
+
+        This is designed to be safe to run concurrently with asyncio.gather:
+        it never raises. If the async LLM call fails, it falls back to a
+        synchronous call (same behavior as before); if that also fails, the
+        node is conservatively graded "no" rather than blowing up the whole
+        gather over one bad node.
+        """
+        prompt = DEFAULT_RELEVANCY_PROMPT_TEMPLATE.format(
+            context_str=node.text, query_str=query_str)
+        try:
+            relevancy = await self.llm.acomplete(prompt)
+            print(f"DEBUG: Node {i} relevancy: {relevancy.text}")
+            return relevancy.text.lower().strip()
+        except Exception as e:
+            try:
+                # Fallback to synchronous call if async is not supported
+                relevancy = self.llm.complete(prompt)
+                print(f"DEBUG: Node {i} relevancy (sync fallback): {relevancy.text}")
+                return relevancy.text.lower().strip()
+            except Exception as e2:
+                print(f"DEBUG: Node {i} relevancy grading failed ({e2!r}), treating as 'no'")
+                return "no"
+
     @step
     async def eval_relevance(
         self, ctx: Context, ev: RetrieveEvent
@@ -150,20 +186,21 @@ class CorrectiveRAGWorkflow(Workflow):
         print(f"DEBUG: Retrieved {len(retrieved_nodes)} nodes")
         print(f"DEBUG: Query: {query_str}")
 
-        relevancy_results = []
         for i, node in enumerate(retrieved_nodes):
             print(f"DEBUG: Node {i} text preview: {node.text[:100]}...")
-            prompt = DEFAULT_RELEVANCY_PROMPT_TEMPLATE.format(
-                context_str=node.text, query_str=query_str)
-            try:
-                relevancy = await self.llm.acomplete(prompt)
-                relevancy_results.append(relevancy.text.lower().strip())
-                print(f"DEBUG: Node {i} relevancy: {relevancy.text}")
-            except Exception as e:
-                # Fallback to synchronous call if async is not supported
-                relevancy = self.llm.complete(prompt)
-                relevancy_results.append(relevancy.text.lower().strip())
-                print(f"DEBUG: Node {i} relevancy (sync): {relevancy.text}")
+
+        # Grade all nodes concurrently instead of one LLM call at a time -
+        # grading N nodes now takes roughly the latency of ONE call instead
+        # of N sequential calls. gather() preserves input order in its
+        # results regardless of completion order, so relevancy_results[i]
+        # still lines up with retrieved_nodes[i].
+        print(f"DEBUG: Grading {len(retrieved_nodes)} nodes concurrently")
+        relevancy_results = await asyncio.gather(
+            *(
+                self._grade_node_relevance(i, node, query_str)
+                for i, node in enumerate(retrieved_nodes)
+            )
+        )
 
         print(f"DEBUG: All relevancy results: {relevancy_results}")
 
@@ -176,15 +213,27 @@ class CorrectiveRAGWorkflow(Workflow):
             if "yes" in result.lower()
         ]
         relevant_text = "\n".join(relevant_texts)
-        
+
         print(f"DEBUG: Relevant texts count: {len(relevant_texts)}")
         print(f"DEBUG: Relevant text preview: {relevant_text[:200]}...")
-        
-        if "no" in relevancy_results_striped:
-            print("DEBUG: Some documents irrelevant, returning WebSearchEvent")
+
+        # Confidence-tiered decision (CRAG-style) instead of a binary "any
+        # node graded 'no' triggers a full web search": only fall back to
+        # web search when the fraction of relevant nodes drops below
+        # RELEVANCE_TRIGGER_THRESHOLD. This avoids nuking a mostly-good
+        # retrieval (e.g. 9/10 relevant) just because one node was noisy.
+        num_nodes = len(retrieved_nodes)
+        relevant_fraction = (len(relevant_texts) / num_nodes) if num_nodes else 0.0
+        print(
+            f"DEBUG: Relevant fraction: {relevant_fraction:.2f} "
+            f"(threshold: {self.RELEVANCE_TRIGGER_THRESHOLD})"
+        )
+
+        if relevant_fraction < self.RELEVANCE_TRIGGER_THRESHOLD:
+            print("DEBUG: Relevant fraction below threshold, returning WebSearchEvent")
             return WebSearchEvent(relevant_text=relevant_text)
         else:
-            print("DEBUG: All documents relevant, returning QueryEvent")
+            print("DEBUG: Relevant fraction meets threshold, returning QueryEvent")
             return QueryEvent(relevant_text=relevant_text, search_text="")
 
     def _firecrawl_search(self, query: str, limit: int = 5) -> str:
