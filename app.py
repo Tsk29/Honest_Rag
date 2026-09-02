@@ -34,7 +34,7 @@ KB_MANIFEST_PATH = "./milvus_demo_docs.json"
 
 
 # Set up page configuration
-st.set_page_config(page_title="Corrective RAG Demo", layout="wide")
+st.set_page_config(page_title="HonestRAG", layout="wide")
 
 
 def load_indexed_docs():
@@ -342,8 +342,11 @@ with col1:
     # Centered main heading
     st.markdown('''
         <h1 style="text-align: center; font-weight: 500; color: #8de2ff;">
-            Corrective RAG Agentic Workflow
+            HonestRAG
         </h1>
+        <p style="text-align: center; color: #9aa5b1; margin-top: -8px;">
+            Corrective RAG Agentic Workflow — retrieves, grades its own relevance, and falls back to live web search when local documents fall short.
+        </p>
     ''', unsafe_allow_html=True)
     
     # Logos section below the heading

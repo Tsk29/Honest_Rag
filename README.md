@@ -1,6 +1,8 @@
-# FireCrawl Agentic RAG Workflow
+# HonestRAG
 
-This project implements an intelligent RAG (Retrieval-Augmented Generation) system using FireCrawl for web search capabilities and LlamaIndex for document processing. The system combines document retrieval with web search to provide comprehensive and accurate answers to user queries.
+An intelligent Corrective RAG (Retrieval-Augmented Generation) system using FireCrawl for web search capabilities and LlamaIndex for document processing. The system grades the relevance of its own document retrieval and falls back to live web search when local documents fall short, combining both to provide comprehensive and accurate answers to user queries.
+
+*Originally based on [patchy631/ai-engineering-hub's firecrawl-agent](https://github.com/patchy631/ai-engineering-hub/tree/main/firecrawl-agent), extended with concurrent relevance grading, a confidence-tiered web-search trigger, source citations, real token streaming, multi-document persistent indexing, and a relevance-grader evaluation harness.*
 
 ## Features
 
