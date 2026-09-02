@@ -9,3 +9,10 @@ wheels/
 # Virtual environments
 .venv
 *.env
+
+# Local demo data - the persistent Milvus vector store, its document
+# manifest, and the FastEmbed model cache. Generated on first run, specific
+# to whatever's been uploaded locally, and not meant to ship with the repo.
+milvus_demo.db/
+milvus_demo_docs.json
+hf_cache/

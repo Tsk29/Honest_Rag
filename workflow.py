@@ -14,7 +14,7 @@ from llama_index.core.workflow import (
 from llama_index.core import SummaryIndex
 from llama_index.core.schema import Document
 from llama_index.core.prompts import PromptTemplate
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.groq import Groq
 from llama_index.core.llms import LLM
 from llama_index.core.base.base_retriever import BaseRetriever
 from typing import List
@@ -151,9 +151,9 @@ class CorrectiveRAGWorkflow(Workflow):
             #     base_url="http://localhost:11434",
             #     temperature=0.1,
             # )
-            self.llm = OpenAI(
-                model="gpt-4o",
-                api_key=os.getenv("OPENAI_API_KEY"),
+            self.llm = Groq(
+                model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+                api_key=os.getenv("GROQ_API_KEY"),
             )
         
         # Set the global LLM settings to avoid conflicts

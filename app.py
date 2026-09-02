@@ -6,11 +6,10 @@ from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.core import StorageContext
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.groq import Groq
 import uuid
 import tempfile
 import gc
-import base64
 import json
 import qdrant_client
 import streamlit as st
@@ -34,7 +33,142 @@ KB_MANIFEST_PATH = "./milvus_demo_docs.json"
 
 
 # Set up page configuration
-st.set_page_config(page_title="HonestRAG", layout="wide")
+st.set_page_config(page_title="HonestRAG", layout="wide", page_icon="📓")
+
+# NotebookLM-inspired theme: dark charcoal canvas, a narrow "Sources" rail on
+# the left, flat rounded cards instead of Streamlit's default boxy widgets,
+# and a restrained blue accent. This only reskins existing Streamlit
+# components via their stable data-testid hooks - no layout logic changes.
+st.markdown("""
+<style>
+    :root {
+        --nb-bg: #131314;
+        --nb-surface: #1e1f20;
+        --nb-surface-hover: #26282a;
+        --nb-border: #3c4043;
+        --nb-text: #e3e3e3;
+        --nb-text-dim: #9aa0a6;
+        --nb-accent: #a8c7fa;
+    }
+
+    html, body, [class*="css"] { font-family: "Google Sans", "Segoe UI", Roboto, system-ui, sans-serif; }
+    .stApp { background: var(--nb-bg); }
+
+    /* Sidebar -> Sources rail */
+    section[data-testid="stSidebar"] {
+        background: var(--nb-surface);
+        border-right: 1px solid var(--nb-border);
+    }
+    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+        color: var(--nb-text);
+        font-weight: 500;
+        font-size: 0.95rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        opacity: 0.75;
+    }
+
+    /* Upload dropzone as a rounded, dashed "add source" card */
+    [data-testid="stFileUploaderDropzone"] {
+        background: var(--nb-bg) !important;
+        border: 1.5px dashed var(--nb-border) !important;
+        border-radius: 14px !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        border-color: var(--nb-accent) !important;
+    }
+
+    /* Buttons - pill-shaped, flat */
+    .stButton > button {
+        border-radius: 999px;
+        border: 1px solid var(--nb-border);
+        background: var(--nb-surface);
+        color: var(--nb-text);
+    }
+    .stButton > button:hover {
+        border-color: var(--nb-accent);
+        color: var(--nb-accent);
+    }
+
+    /* Source cards inside the Knowledge base list */
+    .nb-source-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: var(--nb-bg);
+        border: 1px solid var(--nb-border);
+        border-radius: 10px;
+        padding: 8px 12px;
+        margin-bottom: 6px;
+        font-size: 0.85rem;
+        color: var(--nb-text);
+    }
+    .nb-source-card .nb-icon { opacity: 0.8; }
+
+    /* Chat input as a floating rounded bar */
+    [data-testid="stChatInput"] textarea {
+        border-radius: 24px !important;
+    }
+
+    /* Chat bubbles */
+    [data-testid="stChatMessage"] {
+        background: var(--nb-surface);
+        border-radius: 16px;
+        border: 1px solid var(--nb-border);
+        padding: 4px 8px;
+    }
+
+    /* Expanders (sources / logs) as subtle chips */
+    [data-testid="stExpander"] {
+        border: 1px solid var(--nb-border) !important;
+        border-radius: 12px !important;
+        background: var(--nb-surface) !important;
+    }
+
+    /* Empty-state welcome card */
+    .nb-empty-state {
+        max-width: 560px;
+        margin: 8vh auto 0 auto;
+        text-align: center;
+        padding: 32px;
+        border: 1px solid var(--nb-border);
+        border-radius: 20px;
+        background: var(--nb-surface);
+    }
+    .nb-empty-state h2 {
+        color: var(--nb-text);
+        font-weight: 500;
+        margin-bottom: 8px;
+    }
+    .nb-empty-state p {
+        color: var(--nb-text-dim);
+        font-size: 0.95rem;
+        line-height: 1.5;
+    }
+
+    /* Top bar */
+    .nb-topbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 4px 0 18px 0;
+        border-bottom: 1px solid var(--nb-border);
+        margin-bottom: 20px;
+    }
+    .nb-topbar .nb-title {
+        font-size: 1.15rem;
+        font-weight: 500;
+        color: var(--nb-text);
+    }
+    .nb-topbar .nb-badge {
+        font-size: 0.75rem;
+        color: var(--nb-text-dim);
+        border: 1px solid var(--nb-border);
+        border-radius: 999px;
+        padding: 2px 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
 def load_indexed_docs():
@@ -91,10 +225,13 @@ if "workflow_logs" not in st.session_state:
 session_id = st.session_state.id
 
 
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+
 @st.cache_resource
 def load_llm():
 
-    llm = OpenAI(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
+    llm = Groq(model=GROQ_MODEL, api_key=os.getenv("GROQ_API_KEY"))
     return llm
 
 
@@ -102,19 +239,6 @@ def reset_chat():
     st.session_state.messages = []
     gc.collect()
 
-
-def display_pdf(file):
-    st.markdown("### PDF Preview")
-    base64_pdf = base64.b64encode(file.read()).decode("utf-8")
-
-    # Embedding PDF in HTML
-    pdf_display = f"""<iframe src="data:application/pdf;base64,{base64_pdf}" width="400" height="100%" type="application/pdf"
-                        style="height:100vh; width:100%"
-                    >
-                    </iframe>"""
-
-    # Displaying File
-    st.markdown(pdf_display, unsafe_allow_html=True)
 
 # Functions to build/update the workflow against the persistent Milvus store
 #
@@ -283,13 +407,14 @@ async def run_workflow(query, on_token=None):
         st.error(f"Workflow execution failed: {e}")
         raise e
 
-# Sidebar for document upload
+# Sidebar as a NotebookLM-style "Sources" rail
 with st.sidebar:
 
-    st.header("Add your documents!")
+    st.header("📓 Sources")
 
     uploaded_files = st.file_uploader(
-        "Choose your `.pdf` file(s)", type="pdf", accept_multiple_files=True
+        "Add source", type="pdf", accept_multiple_files=True,
+        label_visibility="collapsed",
     )
 
     if uploaded_files:
@@ -305,97 +430,77 @@ with st.sidebar:
                         with open(file_path, "wb") as out_file:
                             out_file.write(f.getvalue())
 
-                    st.write(f"Indexing {len(new_files)} new document(s)...")
+                    st.caption(f"Indexing {len(new_files)} new source(s)...")
                     add_documents_to_index(temp_dir, [f.name for f in new_files])
-
-                st.success("Ready to Chat!")
             except Exception as e:
                 st.error(f"An error occurred: {e}")
                 st.stop()
-        else:
-            st.success("Ready to Chat!")
 
-        # Preview the most recently selected file.
-        display_pdf(uploaded_files[-1])
+    st.markdown("&nbsp;", unsafe_allow_html=True)
 
-    st.divider()
-    st.subheader("Knowledge base")
     if st.session_state.indexed_docs:
-        st.caption(f"{len(st.session_state.indexed_docs)} document(s) indexed")
+        st.caption(f"{len(st.session_state.indexed_docs)} source(s)")
         for name in st.session_state.indexed_docs:
-            st.markdown(f"- {name}")
+            st.markdown(
+                f'<div class="nb-source-card"><span class="nb-icon">📄</span>'
+                f'<span>{name}</span></div>',
+                unsafe_allow_html=True,
+            )
     else:
-        st.caption("No documents indexed yet.")
+        st.caption("No sources yet. Add a PDF above to get started.")
 
-    st.divider()
-    st.subheader("Danger zone")
-    confirm_clear = st.checkbox("I understand this permanently deletes all indexed documents")
-    if st.button("Clear knowledge base", disabled=not confirm_clear):
-        clear_knowledge_base()
-        st.success("Knowledge base cleared.")
-        st.rerun()
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("Danger zone"):
+        confirm_clear = st.checkbox("I understand this permanently deletes all indexed documents")
+        if st.button("Clear knowledge base", disabled=not confirm_clear):
+            clear_knowledge_base()
+            st.success("Knowledge base cleared.")
+            st.rerun()
 
-# Main chat interface
-col1, col2 = st.columns([6, 1])
-
-with col1:
-    # Centered main heading
-    st.markdown('''
-        <h1 style="text-align: center; font-weight: 500; color: #8de2ff;">
-            HonestRAG
-        </h1>
-        <p style="text-align: center; color: #9aa5b1; margin-top: -8px;">
-            Corrective RAG Agentic Workflow — retrieves, grades its own relevance, and falls back to live web search when local documents fall short.
-        </p>
-    ''', unsafe_allow_html=True)
-    
-    # Logos section below the heading
-    st.markdown('''
-        <div style="text-align: center; margin: 20px 0;">
-            <div style="display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap;">
-                <div style="text-align: center;">
-                    <img src="https://mintlify.s3.us-west-1.amazonaws.com/firecrawl/logo/logo-dark.png" alt="Firecrawl" style="height: 60px; margin-bottom: 5px;">
-                </div>
-                <div style="text-align: center;">
-                    <img src="https://i.ibb.co/m5RtcvnY/beam-logo.png" alt="Beam Cloud" style="height: 60px; margin-bottom: 5px;">
-                </div>
-                <div style="text-align: center;">
-                    <img src="https://milvus.io/images/layout/milvus-logo.svg" alt="Milvus" style="height: 60px; margin-bottom: 5px;">
-                </div>
-                <div style="text-align: center;">
-                    <img src="https://www.comet.com/site/wp-content/uploads/2024/09/comet-logo-1.png" alt="CometML" style="height: 60px; margin-bottom: 5px;">
-                </div>
-            </div>
+# Top bar: compact title + source count badge + clear-chat control. No
+# framework logos or decorative animation - the landing view goes straight
+# to the workspace, the way NotebookLM's does.
+topbar_col, clear_col = st.columns([6, 1])
+with topbar_col:
+    n_sources = len(st.session_state.indexed_docs)
+    badge_text = f"{n_sources} source{'s' if n_sources != 1 else ''}"
+    st.markdown(f'''
+        <div class="nb-topbar">
+            <span style="font-size: 1.4rem;">📓</span>
+            <span class="nb-title">HonestRAG</span>
+            <span class="nb-badge">{badge_text}</span>
         </div>
     ''', unsafe_allow_html=True)
-    
-    # Animation GIF section
-    if "show_animation" not in st.session_state:
-        st.session_state.show_animation = True
-    
-    if st.session_state.show_animation:
-        st.image("https://d3e0luujhwn38u.cloudfront.net/original/img/original/186727/fbd774b8-29da-479a-a60c-880f84d66424.gif", use_container_width=True)
+with clear_col:
+    st.button("Clear ↺", on_click=reset_chat)
 
-with col2:
-    if st.button("Clear ↺", on_click=reset_chat):
-        st.session_state.show_animation = False
+# Empty state: shown until the first message is sent, mirroring NotebookLM's
+# "ask something about your sources" landing prompt instead of a wall of logos.
+# Held in a placeholder so it can be cleared immediately below once a message
+# is appended in this same script run - otherwise it would linger for one
+# extra render, since the message list only reflects the new turn from here on.
+empty_state = st.empty()
+if not st.session_state.messages:
+    empty_state.markdown('''
+        <div class="nb-empty-state">
+            <h2>Ask HonestRAG anything</h2>
+            <p>
+                It answers from your uploaded sources first, grades how relevant
+                what it found actually is, and automatically falls back to a live
+                web search when your sources don't cover the question.
+            </p>
+        </div>
+    ''', unsafe_allow_html=True)
 
 # Display chat messages from history on app rerun
 for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-    # If this is a user message and there are logs associated with it
-    # Display logs AFTER the user message but BEFORE the next assistant message
-    if message["role"] == "user" and "log_index" in message and i < len(st.session_state.messages) - 1:
-        log_index = message["log_index"]
-        if log_index < len(st.session_state.workflow_logs):
-            with st.expander("View Workflow Execution Logs", expanded=False):
-                st.code(
-                    st.session_state.workflow_logs[log_index], language="text")
-
 # Accept user input
 if prompt := st.chat_input("Ask a question about your documents..."):
+    empty_state.empty()
+
     # Add user message to chat history with placeholder for log index
     log_index = len(st.session_state.workflow_logs)
     st.session_state.messages.append(
@@ -443,24 +548,17 @@ if prompt := st.chat_input("Ask a question about your documents..."):
                 message_placeholder.markdown(full_response)
 
                 if sources:
-                    source_lines = []
+                    chips = []
                     for source in sources:
                         if source.get("type") == "document":
-                            source_lines.append("- Uploaded document")
+                            chips.append('<span class="nb-source-card">📄 Uploaded source</span>')
                         elif source.get("type") == "web":
-                            source_lines.append(f"- Web: {source.get('url')}")
-                    if source_lines:
-                        with st.expander("Sources used", expanded=False):
-                            st.markdown("\n".join(source_lines))
-
-            # Display the workflow logs in an expandable section AFTER the
-            # assistant chat bubble (moved from before it: the logs aren't
-            # captured until run_workflow finishes, but the chat bubble now
-            # has to exist beforehand so tokens can stream into it live).
-            if log_index < len(st.session_state.workflow_logs):
-                with st.expander("View Workflow Execution Logs", expanded=False):
-                    st.code(
-                        st.session_state.workflow_logs[log_index], language="text")
+                            chips.append(f'<span class="nb-source-card">🌐 {source.get("url")}</span>')
+                    if chips:
+                        st.markdown(
+                            f'<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">{"".join(chips)}</div>',
+                            unsafe_allow_html=True,
+                        )
 
         except Exception as e:
             st.error(f"Error running workflow: {e}")
