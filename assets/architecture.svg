@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1160" font-family="'Segoe UI', Roboto, system-ui, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa0a6"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#a8c7fa"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="1160" fill="#131314"/>
+
+  <text x="480" y="46" text-anchor="middle" fill="#e3e3e3" font-size="26" font-weight="600">HonestRAG — Corrective RAG Pipeline</text>
+  <text x="480" y="72" text-anchor="middle" fill="#9aa0a6" font-size="14">retrieve → grade → decide → search (if needed) → generate → critique → cite</text>
+
+  <!-- 1. User Query -->
+  <rect x="360" y="104" width="240" height="56" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="138" text-anchor="middle" fill="#e3e3e3" font-size="16">🧑 User Query</text>
+  <line x1="480" y1="160" x2="480" y2="196" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 2. Retrieve -->
+  <rect x="330" y="200" width="300" height="64" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="228" text-anchor="middle" fill="#e3e3e3" font-size="16">🔎 Retrieve</text>
+  <text x="480" y="248" text-anchor="middle" fill="#9aa0a6" font-size="12">top-k nodes from the persistent Milvus index</text>
+  <line x1="480" y1="264" x2="480" y2="300" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 3. Grade relevance -->
+  <rect x="300" y="304" width="360" height="72" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="332" text-anchor="middle" fill="#e3e3e3" font-size="16">⚖️ Grade relevance (concurrent)</text>
+  <text x="480" y="352" text-anchor="middle" fill="#9aa0a6" font-size="12">every retrieved chunk graded yes/no in parallel</text>
+  <text x="480" y="368" text-anchor="middle" fill="#9aa0a6" font-size="12">via asyncio.gather — not one call at a time</text>
+  <line x1="480" y1="376" x2="480" y2="412" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 4. Decision diamond -->
+  <polygon points="480,412 610,472 480,532 350,472" fill="#1e1f20" stroke="#a8c7fa" stroke-width="1.5"/>
+  <text x="480" y="466" text-anchor="middle" fill="#e3e3e3" font-size="14" font-weight="600">relevant fraction</text>
+  <text x="480" y="486" text-anchor="middle" fill="#e3e3e3" font-size="14" font-weight="600">≥ 0.7 ?</text>
+
+  <!-- Branch labels -->
+  <line x1="350" y1="472" x2="220" y2="472" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="285" y="460" text-anchor="middle" fill="#9aa0a6" font-size="12">no</text>
+  <line x1="610" y1="472" x2="740" y2="472" stroke="#a8c7fa" stroke-width="1.5" marker-end="url(#arrowAccent)"/>
+  <text x="675" y="460" text-anchor="middle" fill="#a8c7fa" font-size="12">yes</text>
+
+  <!-- Left branch: web search -->
+  <rect x="70" y="440" width="230" height="64" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="185" y="466" text-anchor="middle" fill="#e3e3e3" font-size="14">🔥 Firecrawl web search</text>
+  <text x="185" y="484" text-anchor="middle" fill="#9aa0a6" font-size="11">query rewritten, results tagged by URL</text>
+
+  <!-- Right branch: trust local -->
+  <rect x="740" y="440" width="200" height="64" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="840" y="466" text-anchor="middle" fill="#e3e3e3" font-size="14">📄 Trust local context</text>
+  <text x="840" y="484" text-anchor="middle" fill="#9aa0a6" font-size="11">no web search needed</text>
+
+  <!-- Merge lines down to Generate -->
+  <line x1="185" y1="504" x2="185" y2="560" stroke="#9aa0a6" stroke-width="1.5"/>
+  <line x1="185" y1="560" x2="480" y2="560" stroke="#9aa0a6" stroke-width="1.5"/>
+  <line x1="840" y1="504" x2="840" y2="560" stroke="#9aa0a6" stroke-width="1.5"/>
+  <line x1="840" y1="560" x2="480" y2="560" stroke="#9aa0a6" stroke-width="1.5"/>
+  <line x1="480" y1="560" x2="480" y2="596" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 5. Generate answer -->
+  <rect x="300" y="600" width="360" height="72" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="628" text-anchor="middle" fill="#e3e3e3" font-size="16">✨ Generate answer (streamed)</text>
+  <text x="480" y="648" text-anchor="middle" fill="#9aa0a6" font-size="12">token-by-token via astream_complete()</text>
+  <text x="480" y="664" text-anchor="middle" fill="#9aa0a6" font-size="12">Groq / local Ollama (Qwen) / OpenAI</text>
+  <line x1="480" y1="672" x2="480" y2="708" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 6. Self-critique -->
+  <rect x="300" y="712" width="360" height="72" rx="16" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="740" text-anchor="middle" fill="#e3e3e3" font-size="16">🧐 Self-critique pass</text>
+  <text x="480" y="760" text-anchor="middle" fill="#9aa0a6" font-size="12">independent LLM call re-checks the finished</text>
+  <text x="480" y="776" text-anchor="middle" fill="#9aa0a6" font-size="12">answer against the same context</text>
+  <line x1="480" y1="784" x2="480" y2="820" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 7. Cited answer -->
+  <rect x="270" y="824" width="420" height="96" rx="16" fill="#1e1f20" stroke="#a8c7fa" stroke-width="1.5"/>
+  <text x="480" y="854" text-anchor="middle" fill="#e3e3e3" font-size="16" font-weight="600">✅ Cited answer</text>
+  <text x="480" y="876" text-anchor="middle" fill="#9aa0a6" font-size="12">every source shown as its exact retrieved snippet</text>
+  <text x="480" y="894" text-anchor="middle" fill="#9aa0a6" font-size="12">plus a "claims checked" verdict from the critique pass</text>
+
+  <!-- Legend -->
+  <rect x="180" y="960" width="600" height="150" rx="14" fill="#1e1f20" stroke="#3c4043"/>
+  <text x="480" y="990" text-anchor="middle" fill="#e3e3e3" font-size="14" font-weight="600">Why "Honest"</text>
+  <text x="210" y="1018" fill="#9aa0a6" font-size="12">• Never trusts its own retrieval blindly — grades relevance before answering</text>
+  <text x="210" y="1042" fill="#9aa0a6" font-size="12">• Falls back to a live web search only when local context genuinely falls short</text>
+  <text x="210" y="1066" fill="#9aa0a6" font-size="12">• Fact-checks its own finished answer before showing it</text>
+  <text x="210" y="1090" fill="#9aa0a6" font-size="12">• Shows the exact snippet behind every claim, not a vague "source used"</text>
+</svg>

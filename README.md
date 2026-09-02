@@ -76,7 +76,7 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
    snippets - it drew on, plus the critique verdict, so you can check its
    work instead of taking it on faith
 
-![Workflow Architecture](assets/animation.gif)
+![HonestRAG pipeline: user query flows through retrieve, concurrent relevance grading, a threshold decision that either trusts local context or triggers a Firecrawl web search, streamed answer generation, a self-critique pass, and a cited answer](assets/architecture.svg)
 
 ## Tech Stack
 
@@ -178,7 +178,7 @@ Honestrag/
 ├── start_server.py          # Optional Beam Cloud deployment (unmodified from
 │                             #   upstream; not part of the local Groq setup above)
 ├── requirements.txt
-└── assets/                  # Architecture diagram and logos used in this README
+└── assets/architecture.svg   # Pipeline diagram used in this README
 ```
 
 ## Configuration
