@@ -1,17 +1,17 @@
 from contextlib import redirect_stdout
 import io
-from workflow import CorrectiveRAGWorkflow
+from workflow import CorrectiveRAGWorkflow, TokenEvent
 from llama_index.core import Settings
 from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.core import StorageContext
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
 from llama_index.llms.openai import OpenAI
-import time
 import uuid
 import tempfile
 import gc
 import base64
+import json
 import qdrant_client
 import streamlit as st
 import asyncio
@@ -24,17 +24,63 @@ nest_asyncio.apply()
 
 load_dotenv()
 
+# The Milvus Lite database is a single local file, and the knowledge base
+# manifest tracks which original filenames have been indexed into it. Both
+# live next to the app so that the knowledge base survives across Streamlit
+# restarts, not just across reruns within one session.
+MILVUS_URI = "./milvus_demo.db"
+MILVUS_COLLECTION = "firecrawl_agent_docs"
+KB_MANIFEST_PATH = "./milvus_demo_docs.json"
+
 
 # Set up page configuration
 st.set_page_config(page_title="Corrective RAG Demo", layout="wide")
 
+
+def load_indexed_docs():
+    """Read the list of filenames already indexed into the persistent Milvus
+    store, so the sidebar can show the real knowledge base contents even
+    after an app restart."""
+    if os.path.exists(KB_MANIFEST_PATH):
+        try:
+            with open(KB_MANIFEST_PATH, "r") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return []
+    return []
+
+
+def save_indexed_docs(names):
+    with open(KB_MANIFEST_PATH, "w") as f:
+        json.dump(names, f)
+
+
+def clear_knowledge_base():
+    """Explicit, opt-in destructive reset. Wipes the persistent Milvus store
+    and the filename manifest, and drops any workflow/index currently held in
+    memory. This is the only place allowed to delete indexed documents."""
+    if os.path.exists(MILVUS_URI):
+        os.remove(MILVUS_URI)
+    if os.path.exists(KB_MANIFEST_PATH):
+        os.remove(KB_MANIFEST_PATH)
+
+    st.session_state.workflow = None
+    st.session_state.indexed_docs = []
+    st.session_state.messages = []
+    st.session_state.workflow_logs = []
+
+
 # Initialize session state variables
 if "id" not in st.session_state:
     st.session_state.id = uuid.uuid4()
-    st.session_state.file_cache = {}
 
 if "workflow" not in st.session_state:
     st.session_state.workflow = None
+
+if "indexed_docs" not in st.session_state:
+    # Bootstrapped from disk so a restarted session immediately knows what's
+    # already in the knowledge base, instead of assuming it's empty.
+    st.session_state.indexed_docs = load_indexed_docs()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -70,72 +116,158 @@ def display_pdf(file):
     # Displaying File
     st.markdown(pdf_display, unsafe_allow_html=True)
 
-# Function to initialize the workflow with uploaded documents
+# Functions to build/update the workflow against the persistent Milvus store
+#
+# NOTE on `overwrite`: MilvusVectorStore only drops the collection when
+# `overwrite=True` AND the collection already exists. When it doesn't exist
+# yet, a fresh one is created regardless of `overwrite`. So passing
+# `overwrite=False` here is enough to get "create on first use, reuse after
+# that" for free - the collection, and therefore every previously uploaded
+# document's embeddings, survives every subsequent call.
+#
+# NOTE on retrieval scope: `VectorStoreIndex.from_documents(...)` builds an
+# `index_struct` that only contains the nodes passed to *that* call. Calling
+# `.as_retriever()` on that specific index object restricts search to just
+# those nodes (via a node_ids filter), which would silently limit answers to
+# only the most recently uploaded document. To search across everything ever
+# indexed, the workflow is handed an index built with
+# `VectorStoreIndex.from_vector_store(...)` instead, which has an empty
+# node_ids restriction and therefore queries the full Milvus collection.
 
 
-def initialize_workflow(file_path):
+def _build_settings_and_store():
+    vector_store = MilvusVectorStore(
+        uri=MILVUS_URI,
+        collection_name=MILVUS_COLLECTION,
+        dim=1024,
+        overwrite=False,
+    )
+
+    embed_model = FastEmbedEmbedding(model_name="BAAI/bge-large-en-v1.5", cache_dir="./hf_cache")
+    Settings.embed_model = embed_model
+
+    llm = load_llm()
+    Settings.llm = llm
+
+    return vector_store, embed_model, llm
+
+
+def _build_workflow(index, llm):
+    if "FIRECRAWL_API_KEY" not in os.environ:
+        raise ValueError("FireCrawl API key not found. Please enter it in the sidebar.")
+
+    workflow = CorrectiveRAGWorkflow(
+        index=index,
+        firecrawl_api_key=os.environ["FIRECRAWL_API_KEY"],
+        verbose=True,
+        timeout=249,  # Increased timeout to match workflow execution
+        llm=llm
+    )
+    print("DEBUG: Workflow created")
+    return workflow
+
+
+def add_documents_to_index(file_path, new_filenames):
+    """Embed and insert the documents found under `file_path` into the
+    persistent knowledge base, then rebuild the workflow so it can retrieve
+    across every document indexed so far (not just this batch)."""
     try:
-        with st.spinner("Loading documents and initializing the workflow..."):
+        with st.spinner("Loading documents and updating the knowledge base..."):
             documents = SimpleDirectoryReader(file_path).load_data()
             print(f"DEBUG: Loaded {len(documents)} documents")
             for i, doc in enumerate(documents):
                 print(f"DEBUG: Document {i} preview: {doc.text[:100]}...")
 
-            vector_store = MilvusVectorStore(
-                uri="./milvus_demo.db", dim= 1024, overwrite=True
-            )
-            print("DEBUG: Milvus vector store created")
-            
-            embed_model = FastEmbedEmbedding(model_name="BAAI/bge-large-en-v1.5", cache_dir="./hf_cache")
-            Settings.embed_model = embed_model
-            print("DEBUG: Embedding model set")
-            
-            llm = load_llm()
-            print("DEBUG: LLM loaded")
+            vector_store, embed_model, llm = _build_settings_and_store()
+            print("DEBUG: Milvus vector store ready (persistent, not overwritten)")
 
-            Settings.llm = llm
-            storage_context = StorageContext.from_defaults(
-                vector_store=vector_store)
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
             print("DEBUG: Storage context created")
-            
-            index = VectorStoreIndex.from_documents(
+
+            # Embeds and inserts the new documents' nodes into the existing
+            # (or freshly created) Milvus collection. The returned index
+            # object is intentionally not used for retrieval - see note above.
+            VectorStoreIndex.from_documents(
                 documents,
                 storage_context=storage_context,
             )
-            print("DEBUG: Index created")
+            print("DEBUG: New documents inserted into the persistent index")
 
-            # Check if FIRECRAWL_API_KEY is available
-            if "FIRECRAWL_API_KEY" not in os.environ:
-                raise ValueError("FireCrawl API key not found. Please enter it in the sidebar.")
+            # Rebuilt from the vector store so retrieval spans the whole
+            # accumulated knowledge base, including documents from earlier
+            # uploads/sessions.
+            index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
 
-            workflow = CorrectiveRAGWorkflow(
-                index=index,
-                firecrawl_api_key=os.environ["FIRECRAWL_API_KEY"],
-                verbose=True,
-                timeout=249,  # Increased timeout to match workflow execution
-                llm=llm
-            )
-            print("DEBUG: Workflow created")
-
+            workflow = _build_workflow(index, llm)
             st.session_state.workflow = workflow
+
+            for name in new_filenames:
+                if name not in st.session_state.indexed_docs:
+                    st.session_state.indexed_docs.append(name)
+            save_indexed_docs(st.session_state.indexed_docs)
+
             return workflow
     except Exception as e:
-        st.error(f"Failed to initialize workflow: {e}")
+        st.error(f"Failed to update the knowledge base: {e}")
         raise e
+
+
+def resume_workflow_from_existing_store():
+    """Reconstruct a workflow from whatever is already persisted in Milvus,
+    without requiring a new upload. Used to resume a session where the
+    knowledge base already has documents from a previous run."""
+    vector_store, embed_model, llm = _build_settings_and_store()
+    index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+    workflow = _build_workflow(index, llm)
+    st.session_state.workflow = workflow
+    return workflow
+
+
+# Resume automatically if the knowledge base already has documents (e.g. from
+# an earlier run of the app) but this session hasn't built a workflow yet.
+# Best-effort: without a FireCrawl key configured (as in this dev
+# environment), this just leaves the workflow unset instead of crashing the
+# whole app - the user still sees the existing document list in the sidebar.
+if st.session_state.workflow is None and st.session_state.indexed_docs:
+    try:
+        resume_workflow_from_existing_store()
+    except Exception as e:
+        st.sidebar.warning(f"Could not resume the existing knowledge base: {e}")
 
 # Function to run the async workflow
 
 
-async def run_workflow(query):
+async def run_workflow(query, on_token=None):
+    """Run the workflow to completion, optionally streaming tokens as they arrive.
+
+    `CorrectiveRAGWorkflow.run(...)` returns a `WorkflowHandler` immediately
+    (it doesn't need to be awaited to start the run). That handler is both
+    awaitable (for the final `StopEvent` result) and exposes
+    `stream_events()`, an async generator of every event a step writes via
+    `ctx.write_event_to_stream()` - including the `TokenEvent`s that
+    `query_result()` emits for each streamed LLM delta. Iterating that
+    generator to completion is what actually drives/advances the workflow;
+    it ends automatically once the StopEvent is produced, at which point
+    `await handler` resolves instantly with the final result.
+
+    `on_token`, if given, is called synchronously with each token's delta
+    string as it streams in - the caller (see the chat-input handling below)
+    uses it to update the Streamlit placeholder live, instead of faking a
+    reveal after the fact.
+    """
     try:
         # Capture stdout to get the workflow logs
         f = io.StringIO()
         with redirect_stdout(f):
+            async def _drive_and_collect():
+                handler = st.session_state.workflow.run(query_str=query)
+                async for event in handler.stream_events():
+                    if isinstance(event, TokenEvent) and on_token is not None:
+                        on_token(event.delta)
+                return await handler
+
             # Add timeout to prevent hanging
-            result = await asyncio.wait_for(
-                st.session_state.workflow.run(query_str=query),
-                timeout=120  # 2 minutes timeout
-            )
+            result = await asyncio.wait_for(_drive_and_collect(), timeout=120)
 
         # Get the captured logs and store them
         logs = f.getvalue()
@@ -156,32 +288,52 @@ with st.sidebar:
 
     st.header("Add your documents!")
 
-    uploaded_file = st.file_uploader("Choose your `.pdf` file", type="pdf")
+    uploaded_files = st.file_uploader(
+        "Choose your `.pdf` file(s)", type="pdf", accept_multiple_files=True
+    )
 
-    if uploaded_file:
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                file_path = os.path.join(temp_dir, uploaded_file.name)
+    if uploaded_files:
+        # The uploader re-sends every currently-selected file on each rerun,
+        # so only process the ones not already in the knowledge base.
+        new_files = [f for f in uploaded_files if f.name not in st.session_state.indexed_docs]
 
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getvalue())
+        if new_files:
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    for f in new_files:
+                        file_path = os.path.join(temp_dir, f.name)
+                        with open(file_path, "wb") as out_file:
+                            out_file.write(f.getvalue())
 
-                file_key = f"{session_id}-{uploaded_file.name}"
-                st.write("Indexing your document...")
+                    st.write(f"Indexing {len(new_files)} new document(s)...")
+                    add_documents_to_index(temp_dir, [f.name for f in new_files])
 
-                if file_key not in st.session_state.get('file_cache', {}):
-                    # Initialize workflow with the uploaded document
-                    workflow = initialize_workflow(temp_dir)
-                    st.session_state.file_cache[file_key] = workflow
-                else:
-                    st.session_state.workflow = st.session_state.file_cache[file_key]
-
-                # Inform the user that the file is processed and Display the PDF uploaded
                 st.success("Ready to Chat!")
-                display_pdf(uploaded_file)
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-            st.stop()
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+                st.stop()
+        else:
+            st.success("Ready to Chat!")
+
+        # Preview the most recently selected file.
+        display_pdf(uploaded_files[-1])
+
+    st.divider()
+    st.subheader("Knowledge base")
+    if st.session_state.indexed_docs:
+        st.caption(f"{len(st.session_state.indexed_docs)} document(s) indexed")
+        for name in st.session_state.indexed_docs:
+            st.markdown(f"- {name}")
+    else:
+        st.caption("No documents indexed yet.")
+
+    st.divider()
+    st.subheader("Danger zone")
+    confirm_clear = st.checkbox("I understand this permanently deletes all indexed documents")
+    if st.button("Clear knowledge base", disabled=not confirm_clear):
+        clear_knowledge_base()
+        st.success("Knowledge base cleared.")
+        st.rerun()
 
 # Main chat interface
 col1, col2 = st.columns([6, 1])
@@ -250,55 +402,67 @@ if prompt := st.chat_input("Ask a question about your documents..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    full_response = ""
+
     if st.session_state.workflow:
         try:
-            # Run the async workflow with proper error handling
-            result = asyncio.run(run_workflow(prompt))
+            # Display assistant response in chat message container. The
+            # placeholder is created BEFORE run_workflow is called so the
+            # on_token callback below can update it live, token by token, as
+            # the workflow's stream_events() delivers them - Streamlit
+            # renders each .markdown() call as it happens even though we're
+            # still inside asyncio.run(), which is what makes this a real
+            # reveal instead of a post-hoc fake one.
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                streamed_text = {"value": ""}
 
-            # Display the workflow logs in an expandable section OUTSIDE and BEFORE the assistant chat bubble
+                def _on_token(delta: str):
+                    streamed_text["value"] += delta
+                    message_placeholder.markdown(streamed_text["value"] + "▌")
+
+                # Run the async workflow with proper error handling
+                result = asyncio.run(run_workflow(prompt, on_token=_on_token))
+
+                if isinstance(result, dict):
+                    answer_text = result.get("answer", "")
+                    sources = result.get("sources", [])
+                elif hasattr(result, "response"):
+                    answer_text = result.response
+                    sources = []
+                else:
+                    answer_text = str(result)
+                    sources = []
+
+                # Prefer the structured answer; fall back to whatever was
+                # streamed if for some reason the final text came back empty.
+                full_response = answer_text or streamed_text["value"]
+                message_placeholder.markdown(full_response)
+
+                if sources:
+                    source_lines = []
+                    for source in sources:
+                        if source.get("type") == "document":
+                            source_lines.append("- Uploaded document")
+                        elif source.get("type") == "web":
+                            source_lines.append(f"- Web: {source.get('url')}")
+                    if source_lines:
+                        with st.expander("Sources used", expanded=False):
+                            st.markdown("\n".join(source_lines))
+
+            # Display the workflow logs in an expandable section AFTER the
+            # assistant chat bubble (moved from before it: the logs aren't
+            # captured until run_workflow finishes, but the chat bubble now
+            # has to exist beforehand so tokens can stream into it live).
             if log_index < len(st.session_state.workflow_logs):
                 with st.expander("View Workflow Execution Logs", expanded=False):
                     st.code(
                         st.session_state.workflow_logs[log_index], language="text")
 
-            # Display assistant response in chat message container
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                full_response = ""
-
-                if hasattr(result, 'response'):
-                    result_text = result.response
-                else:
-                    result_text = str(result)
-
-                # Stream the response word by word
-                words = result_text.split()
-                for i, word in enumerate(words):
-                    full_response += word + " "
-                    message_placeholder.markdown(full_response + "▌")
-                    # Add a delay between words
-                    if i < len(words) - 1:  # Don't delay after the last word
-                        time.sleep(0.1)
-
-                # Display final response without cursor
-                message_placeholder.markdown(full_response)
-
         except Exception as e:
             st.error(f"Error running workflow: {e}")
             full_response = f"An error occurred while processing your request: {e}"
             st.markdown(full_response)
-
-            # Stream the response word by word
-            words = result.split()
-            for i, word in enumerate(words):
-                full_response += word + " "
-                message_placeholder.markdown(full_response + "▌")
-                # Add a delay between words
-                if i < len(words) - 1:  # Don't delay after the last word
-                    time.sleep(0.1)
-
-            # Display final response without cursor
-            message_placeholder.markdown(full_response)
         # else:
         #     full_response = "Please upload a document first to initialize the workflow."
         #     st.markdown(full_response)
