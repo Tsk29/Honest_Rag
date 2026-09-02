@@ -10,7 +10,7 @@ An intelligent Corrective RAG (Retrieval-Augmented Generation) system using Fire
 - **Corrective RAG Workflow**: Advanced workflow that combines document retrieval with web search
 - **FireCrawl Integration**: Real-time web search capabilities for enhanced information retrieval
 - **Streamlit UI**: User-friendly web interface for document upload and chat
-- **Multiple LLM Support**: Compatible with OpenAI, Ollama, LMStudio, and other LLM providers
+- **Multiple LLM Support**: Runs on Groq by default; also compatible with OpenAI, Ollama, LMStudio, and other LLM providers
 - **Vector Storage**: Uses Milvus for efficient document storage and retrieval
 - **Relevance Filtering**: Intelligent filtering of retrieved documents for better accuracy
 
@@ -21,13 +21,13 @@ An intelligent Corrective RAG (Retrieval-Augmented Generation) system using Fire
 - **Streamlit**: Web application interface
 - **Milvus**: Vector databases for document storage
 - **FastEmbed**: High-performance embedding models
-- **OpenAI/Litellm**: LLM integration for text generation
+- **Groq**: Default LLM provider for answer generation and relevance grading
 
 ## Prerequisites
 
 - Python 3.11 or later
 - FireCrawl API key
-- OpenAI API key (or other LLM provider)
+- Groq API key (or another LLM provider - see `load_llm()` in `app.py`)
 - Sufficient disk space for document storage and caching
 
 ## Setup and Installation
@@ -37,10 +37,12 @@ An intelligent Corrective RAG (Retrieval-Augmented Generation) system using Fire
 - Generate an API key from your dashboard
 - Store it in your environment variables
 
-### 2. Get OpenAI API Key
-- Visit [OpenAI Platform](https://platform.openai.com/) and create an account
+### 2. Get Groq API Key
+- Visit [Groq Console](https://console.groq.com/) and create an account
 - Generate an API key
-- Store it in your environment variables
+- Store it in your environment variables (Groq's model lineup changes often -
+  check `https://api.groq.com/openai/v1/models` if `GROQ_MODEL` errors out
+  as deprecated)
 
 ### 3. Install Dependencies
 
@@ -58,7 +60,8 @@ uv sync
 Create a `.env` file in the project root:
 ```bash
 FIRECRAWL_API_KEY="your_firecrawl_api_key_here"
-OPENAI_API_KEY="your_openai_api_key_here"
+GROQ_API_KEY="your_groq_api_key_here"
+GROQ_MODEL="openai/gpt-oss-120b"  # optional, defaults to this
 ```
 
 ## Running the Project
@@ -119,7 +122,7 @@ firecrawl-agent/
 
 The system supports various configuration options:
 
-- **LLM Models**: OpenAI GPT-4, Ollama models, LMStudio, etc.
+- **LLM Models**: Groq (default), OpenAI, Ollama models, LMStudio, etc.
 - **Embedding Models**: FastEmbed models (default: BAAI/bge-large-en-v1.5)
 - **Vector Stores**: Milvus
 - **Timeout Settings**: Configurable workflow execution timeouts
@@ -129,7 +132,7 @@ The system supports various configuration options:
 
 ### Common Issues
 
-1. **API Key Errors**: Ensure your FireCrawl and OpenAI API keys are correctly set
+1. **API Key Errors**: Ensure your FireCrawl and Groq API keys are correctly set
 2. **Memory Issues**: Large documents may require more memory; consider document chunking
 3. **Timeout Errors**: Increase timeout settings for complex queries
 4. **Vector Store Issues**: Clear storage directories if experiencing database corruption
