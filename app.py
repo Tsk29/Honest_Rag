@@ -338,6 +338,16 @@ def _build_settings_and_store():
         overwrite=False,
     )
 
+    # MilvusVectorStore only calls load_collection() itself when it creates a
+    # brand-new collection (see its constructor) or when collection_properties
+    # are passed - neither applies here. Every fresh connection to an
+    # *existing* collection (e.g. resuming a session, or Milvus Lite's
+    # embedded server restarting) otherwise starts the collection in
+    # "released" state, and any search/query against it fails with
+    # "Collection ... is in state 'released'; call load() before search".
+    if MILVUS_COLLECTION in vector_store.client.list_collections():
+        vector_store.client.load_collection(MILVUS_COLLECTION)
+
     embed_model = FastEmbedEmbedding(model_name="BAAI/bge-large-en-v1.5", cache_dir="./hf_cache")
     Settings.embed_model = embed_model
 
