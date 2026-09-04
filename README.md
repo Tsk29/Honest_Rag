@@ -235,14 +235,29 @@ single most trust-critical judgment in the pipeline.
 
 ### Running it for real
 
+The grading LLM comes from the same `build_llm()` factory the app itself
+uses (`llm_provider.py`), so the harness follows whatever `LLM_PROVIDER` is
+already set in `.env` - the default is Groq, so in most cases no extra
+credential is needed beyond what the app already requires:
+
 ```bash
-OPENAI_API_KEY="your_openai_api_key_here" python eval/run_eval.py
+python eval/run_eval.py
 ```
 
-Optional flags: `--model` (default `gpt-4o`) and `--dataset` to point at a
-different labeled file. The eval harness still runs against OpenAI
-independently of the app's own Groq-backed grader, so it can score the
-grader's prompt/logic against a fixed, well-understood model.
+To evaluate against a fixed, independent baseline model instead of whatever
+the app happens to be configured with:
+
+```bash
+LLM_PROVIDER=openai OPENAI_API_KEY="your_openai_api_key_here" python eval/run_eval.py
+```
+
+`--dataset` points at a different labeled file if needed.
+
+Sample run against the default Groq provider (`openai/gpt-oss-120b`), 20
+examples: **accuracy 0.900, precision 0.833, recall 1.000, F1 0.909** (2
+false positives, 0 false negatives) - the grader never let a truly relevant
+chunk go unrecognized, but on 2 of the 20 examples called a topically-close
+but non-answering chunk "relevant" when it wasn't.
 
 ### Mock mode
 
@@ -250,12 +265,13 @@ grader's prompt/logic against a fixed, well-understood model.
 python eval/run_eval.py --mock
 ```
 
-`--mock` (also triggered automatically if `OPENAI_API_KEY` isn't set) swaps
-in a crude deterministic keyword-overlap heuristic instead of a real LLM
-call. It exists solely so the harness's own plumbing - dataset loading,
-prompt formatting, and metrics computation - can be verified without an API
-key. Mock-mode numbers say nothing about the real grader's quality; only a
-run with a real `OPENAI_API_KEY` is a meaningful evaluation.
+`--mock` (also triggered automatically if no credentials are found for the
+active `LLM_PROVIDER`) swaps in a crude deterministic keyword-overlap
+heuristic instead of a real LLM call. It exists solely so the harness's own
+plumbing - dataset loading, prompt formatting, and metrics computation - can
+be verified without an API key. Mock-mode numbers say nothing about the real
+grader's quality; only a run with real provider credentials is a meaningful
+evaluation.
 
 ## Acknowledgments
 

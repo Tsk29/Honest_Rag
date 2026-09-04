@@ -16,15 +16,20 @@ This deliberately does NOT call CorrectiveRAGWorkflow's internals - just the
 prompt template and the grading contract ("chunk + query in, yes/no out") -
 so the harness keeps working if eval_relevance itself gets refactored.
 
+The grading LLM itself comes from the same build_llm() factory the app uses
+(llm_provider.py), so the harness follows whatever LLM_PROVIDER is already
+configured in .env - no separate credential just for eval.
+
 Usage:
-    OPENAI_API_KEY=sk-...  python eval/run_eval.py           # real evaluation
+    GROQ_API_KEY=...       python eval/run_eval.py           # real evaluation (default provider)
+    LLM_PROVIDER=openai OPENAI_API_KEY=sk-... python eval/run_eval.py  # evaluate against a fixed baseline model
     python eval/run_eval.py --mock                            # harness smoke test only
-    python eval/run_eval.py                                   # auto-falls back to --mock if no key
+    python eval/run_eval.py                                   # auto-falls back to --mock if no credentials
 
 --mock uses a crude deterministic keyword-overlap heuristic instead of a real
 LLM. It exists ONLY so the harness's data loading and metrics computation can
 be verified to work without an API key. It says nothing about how good the
-real grader is - only a real OPENAI_API_KEY run does that.
+real grader is - only a run with real provider credentials does that.
 """
 
 import argparse
@@ -38,6 +43,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from workflow import DEFAULT_RELEVANCY_PROMPT_TEMPLATE
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "dataset.jsonl")
+
+_PROVIDER_KEY_ENV = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}
+
+
+def _provider_has_credentials(provider):
+    """Ollama needs no API key (just a running local server); the hosted
+    providers need their key present."""
+    if provider == "ollama":
+        return True
+    return bool(os.getenv(_PROVIDER_KEY_ENV.get(provider, "")))
+
 
 STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "of", "in", "on", "to",
@@ -127,21 +143,20 @@ def main():
         help="Use a deterministic mock LLM instead of a real API call. For testing the harness itself only.",
     )
     parser.add_argument("--dataset", default=DATASET_PATH, help="Path to the eval dataset (JSONL).")
-    parser.add_argument("--model", default="gpt-4o", help="OpenAI model to use for real evaluation.")
     args = parser.parse_args()
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    use_mock = args.mock or not api_key
+    provider = os.getenv("LLM_PROVIDER", "groq").lower()
+    use_mock = args.mock or not _provider_has_credentials(provider)
 
     if use_mock and not args.mock:
-        print("WARNING: OPENAI_API_KEY is not set - auto-falling back to --mock mode.")
+        print(f"WARNING: no credentials found for LLM_PROVIDER={provider!r} - auto-falling back to --mock mode.")
         print("This only proves the harness scaffolding works. It does NOT evaluate the real grader.")
         print()
 
     llm = None
     if not use_mock:
-        from llama_index.llms.openai import OpenAI
-        llm = OpenAI(model=args.model, api_key=api_key)
+        from llm_provider import build_llm
+        llm = build_llm()
 
     examples = load_dataset(args.dataset)
 
@@ -149,7 +164,8 @@ def main():
         print("=" * 72)
         print("MOCK MODE - using a keyword-overlap heuristic, NOT a real LLM.")
         print("This only proves data loading + metrics computation work.")
-        print("For a real evaluation: OPENAI_API_KEY=sk-... python eval/run_eval.py")
+        print("For a real evaluation, set the API key for your LLM_PROVIDER, e.g.:")
+        print("  GROQ_API_KEY=... python eval/run_eval.py")
         print("=" * 72)
         print()
 
