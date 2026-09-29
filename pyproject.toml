@@ -27,9 +27,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # UI for the Hugging Face Space (gradio_app.py). Kept optional so the Docker
-# image, which serves the Streamlit UI, doesn't carry it.
+# image, which serves the Streamlit UI, doesn't carry it. The Space's builder
+# installs `gradio[oauth,mcp]` and `spaces` on top of our requirements.txt, so
+# they're locked here too - otherwise uv.lock can pin versions (e.g. pydantic)
+# that conflict with what the Space adds, and the Space build fails.
 space = [
-    "gradio>=5.0",
+    "gradio[oauth,mcp]>=5.0",
+    "spaces>=0.51",
 ]
 
 [dependency-groups]
