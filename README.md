@@ -1,5 +1,8 @@
 # HonestRAG
 
+[![CI/CD](https://github.com/Tsk29/Honest_Rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsk29/Honest_Rag/actions/workflows/ci.yml)
+[![Hugging Face Space](https://img.shields.io/badge/%F0%9F%A4%97%20Space-tsk29%2Fhonestrag-yellow)](https://huggingface.co/spaces/tsk29/honestrag)
+
 A Corrective RAG (Retrieval-Augmented Generation) system that doesn't just trust
 its own retrieval - or its own answer. It grades the relevance of what it
 pulled from your documents, falls back to a live web search (via Firecrawl)
@@ -13,7 +16,12 @@ then substantially rebuilt: concurrent relevance grading, a confidence-tiered
 web-search trigger, a self-critique pass on every answer, per-snippet source
 citations, real token streaming, a pluggable LLM layer (Groq / local Ollama /
 OpenAI), multi-document persistent indexing with per-source removal, a
-relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
+relevance-grader evaluation harness, and a NotebookLM-inspired UI - then
+containerised with Docker, covered by an offline test suite, wired into a
+GitHub Actions CI/CD pipeline, and deployed to a Hugging Face Space.*
+
+**Live:** [huggingface.co/spaces/tsk29/honestrag](https://huggingface.co/spaces/tsk29/honestrag)
+(private Space - see [Deployment](#deployment-free)).
 
 ## Features
 
@@ -51,7 +59,22 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 **Interface**
 - Streamlit UI restyled in a NotebookLM-inspired layout: dark theme, a
   dedicated Sources rail, a compact top bar, and an empty-state welcome card
-  instead of a logo banner
+  instead of a logo banner - used locally and in Docker
+- A Gradio UI with the same features (sources panel, streaming chat, critique
+  verdict, expandable citations) - what the Hugging Face Space runs. Both UIs
+  share one indexing/answering layer, so they behave identically
+
+**Engineering**
+- Docker image (multi-stage, non-root, healthchecked, embedding model baked
+  in) and `docker compose` with an optional local Ollama
+- Offline pytest suite (46 tests, no API keys): a scripted fake LLM drives the
+  whole workflow end to end; knowledge-base tests run against a real embedded
+  Milvus Lite
+- GitHub Actions CI/CD: lint, tests on Python 3.11 + 3.12, image build and
+  boot tests on every push; versioned image, GitHub Release and Space deploy
+  on every `vX.Y.Z` tag
+- Knowledge base configurable between a local Milvus Lite file and a hosted
+  Milvus (Zilliz Cloud) with two environment variables, no code change
 
 **Measurement**
 - A small evaluation harness (`eval/`) scores the relevance grader itself on
@@ -85,9 +108,12 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
 | RAG framework | [LlamaIndex](https://github.com/run-llama/llama_index) (Workflow-based orchestration) |
 | LLM | [Groq](https://groq.com/) by default; [Ollama](https://ollama.com/) (local) or OpenAI via `LLM_PROVIDER` |
 | Web search | [Firecrawl](https://firecrawl.dev/) |
-| Vector store | [Milvus](https://milvus.io/) (Milvus Lite, local file-based) |
+| Vector store | [Milvus](https://milvus.io/) - Milvus Lite (local file) or [Zilliz Cloud](https://zilliz.com/cloud) (hosted) |
 | Embeddings | [FastEmbed](https://github.com/qdrant/fastembed) (`BAAI/bge-large-en-v1.5`) |
-| UI | [Streamlit](https://streamlit.io/) |
+| UI | [Streamlit](https://streamlit.io/) (local / Docker), [Gradio](https://www.gradio.app/) (Hugging Face Space) |
+| Packaging | [uv](https://docs.astral.sh/uv/) lockfile, Docker, Docker Compose |
+| CI/CD | GitHub Actions, GitHub Container Registry, Dependabot |
+| Hosting | [Hugging Face Spaces](https://huggingface.co/spaces) (free ZeroGPU hardware) |
 
 ## Setup and Installation
 
@@ -250,30 +276,38 @@ git tag v0.2.0 && git push origin v0.2.0
 
 ## Deployment (free)
 
-The live app runs on a **Hugging Face Space** (free CPU hardware, Gradio UI)
-with the vector store on **Zilliz Cloud's free tier** (hosted Milvus), for
-$0/month.
+The app runs on a **private Hugging Face Space** -
+[`tsk29/honestrag`](https://huggingface.co/spaces/tsk29/honestrag) - on the
+free tier, for $0/month.
 
 ```
 git tag vX.Y.Z → CI: lint, tests, Docker build ─→ deploy.yml pushes the Gradio app → HF Space
                                                                                       │
-                                                  Groq · Firecrawl ◄───────────────────┼──► Zilliz Cloud (vectors)
+                                                  Groq · Firecrawl ◄───────────────────┼──► Zilliz Cloud (optional)
 ```
 
 - **Two UIs, one pipeline.** Free Spaces host Gradio apps but not Docker
-  ones, so the Space runs `gradio_app.py`; local and Docker use keep the
-  Streamlit UI (`app.py`). Both call the same `rag_service.py` for indexing
-  and the same `workflow.py` for answering, so they can't drift apart in
-  behaviour - only the presentation differs.
+  ones (Docker Spaces are paid), so the Space runs `gradio_app.py`; local and
+  Docker use keep the Streamlit UI (`app.py`). Both call the same
+  `rag_service.py` for indexing and the same `workflow.py` for answering, so
+  they can't drift apart in behaviour - only the presentation differs.
+- **ZeroGPU hardware.** On a free account, Gradio Spaces run on ZeroGPU (the
+  plain CPU tier needs PRO). HonestRAG needs no GPU - embeddings run on CPU
+  via ONNX and the LLM is Groq's API - so it uses none of the daily GPU quota.
+  ZeroGPU only supports Python 3.10.13 / 3.12.12, so the Space uses 3.12.12,
+  and it expects one `@spaces.GPU` function at startup, which `gradio_app.py`
+  registers as a never-called placeholder.
 - **Tested versions only.** The Space's `requirements.txt` is exported from
-  `uv.lock` at deploy time, and its Gradio version is pinned to the same
-  one, so production installs exactly what CI tested.
-- **Same code, different config.** Locally the vector store is an embedded
-  Milvus Lite file; in production `HONESTRAG_MILVUS_URI` /
-  `HONESTRAG_MILVUS_TOKEN` point at Zilliz Cloud. That's what lets uploads
-  survive the Space restarting or sleeping, with no paid persistent disk.
-  The Sources list is read from the vector store itself
-  (`knowledge_base.py`), so there is no local state to lose.
+  `uv.lock`, with Gradio pinned to the same version. The Space builder also
+  installs `gradio[oauth,mcp]` and `spaces` on top, so those are locked in the
+  `space` extra too - otherwise the lockfile can pin versions the builder's
+  extras reject (this happened with `pydantic`).
+- **Same code, different config.** With no `HONESTRAG_MILVUS_URI` set, the
+  Space stores vectors in a Milvus Lite file inside the container, which is
+  wiped when the Space restarts or sleeps. Pointing `HONESTRAG_MILVUS_URI` /
+  `HONESTRAG_MILVUS_TOKEN` at a free Zilliz Cloud cluster makes uploads
+  permanent. The Sources list is read from the vector store itself
+  (`knowledge_base.py`), so there is no other state to lose.
 - **Rollback:** Actions → *Deploy* → *Run workflow* with an earlier tag.
 
 Run the Gradio UI locally:
@@ -285,25 +319,28 @@ uv run python gradio_app.py        # http://localhost:7860
 
 ### One-time setup
 
-1. **Zilliz Cloud** (free): create a free cluster; copy its public endpoint
-   and API key.
-2. **Hugging Face** (free): create a new Space with SDK **Gradio** (Blank
-   template), hardware **CPU basic**, visibility **Private**. In its
-   *Settings → Variables and secrets*, add the secrets `GROQ_API_KEY`,
-   `FIRECRAWL_API_KEY`, `HONESTRAG_MILVUS_URI`, `HONESTRAG_MILVUS_TOKEN`.
-   Create an access token with **write** permission.
+1. **Hugging Face** (free): create a new Space with SDK **Gradio** (Blank
+   template), hardware **ZeroGPU**, visibility **Private**. In its
+   *Settings → Variables and secrets*, add the secrets `GROQ_API_KEY` and
+   `FIRECRAWL_API_KEY`. Create an access token with **write** permission.
+2. **Zilliz Cloud** (optional, free): create a free cluster and add its
+   public endpoint and API key as the Space secrets `HONESTRAG_MILVUS_URI`
+   and `HONESTRAG_MILVUS_TOKEN`, so uploads survive restarts.
 3. **GitHub repo** → *Settings → Secrets and variables → Actions*: add the
    secret `HF_TOKEN` (that token) and the variable `HF_SPACE`
    (e.g. `tsk29/honestrag`).
 4. Push a tag (see *Cutting a release*). The deploy job replaces the Space's
-   placeholder files and waits until it reports `RUNNING`.
+   files and waits until it reports `RUNNING`.
+
+The current Space was first deployed by uploading the same generated files
+(the output of `deploy.yml`'s *Assemble Space* step) through the Space's web
+UI; later releases go through the pipeline.
 
 Keep the Space **private**: the app has no login, so a public URL would let
 anyone spend your Groq/Firecrawl quota and see every uploaded document (all
 visitors share one knowledge base). Free Spaces sleep after ~48 h without
-visitors and take about a minute to wake; the knowledge base is unaffected.
-The first question after a restart also downloads the embedding model
-(~1.3 GB, fast from inside Hugging Face).
+visitors and take about a minute to wake. The first question after a restart
+also downloads the embedding model (~1.3 GB, fast from inside Hugging Face).
 
 ## Project Structure
 
@@ -362,6 +399,17 @@ Honestrag/
    app imports
 4. **Vector store looking stale or corrupted** - use *Danger zone → Clear
    knowledge base* in the app, then re-upload your documents
+5. **`Illegal uri ... expected form 'http[s]://...'` from pymilvus** - a plain
+   `MILVUS_URI` variable is set somewhere. pymilvus reads that name itself at
+   import time; HonestRAG uses `HONESTRAG_MILVUS_URI` instead
+6. **Hugging Face Space build fails with `ResolutionImpossible`** - the
+   Space's `requirements.txt` conflicts with the `gradio[oauth,mcp]` / `spaces`
+   packages the builder adds. Regenerate it from `uv.lock` (which locks those
+   too) rather than editing it by hand
+7. **`[SSL: CERTIFICATE_VERIFY_FAILED]` downloading NLTK data on macOS** - the
+   python.org installer ships without certificates; run *Install
+   Certificates.command* from the Python folder in Applications, or set
+   `SSL_CERT_FILE=$(python -m certifi)`
 
 ## Evaluation
 
@@ -426,6 +474,32 @@ plumbing - dataset loading, prompt formatting, and metrics computation - can
 be verified without an API key. Mock-mode numbers say nothing about the real
 grader's quality; only a run with real provider credentials is a meaningful
 evaluation.
+
+## Changelog
+
+**Containerisation, CI/CD and deployment**
+- Dependencies: `pyproject.toml` + `uv.lock` became the single source of
+  truth; added the packages the app imported but never declared (Milvus
+  vector store, Groq), removed unused ones, and export `requirements.txt`
+  from the lockfile
+- Docker: multi-stage image, non-root user, healthcheck, embedding model
+  baked in and loaded offline; `docker-compose.yml` with a persistent volume
+  and optional Ollama
+- Tests: new offline pytest suite covering the CRAG workflow (threshold
+  routing, streaming, citations, critique, failure fallbacks), the LLM
+  factory, the eval harness, the knowledge base and both UIs
+- CI/CD: GitHub Actions pipeline (lint → test → Docker build and smoke tests
+  → GHCR publish → GitHub Release → Hugging Face deploy), manual
+  deploy/rollback workflow, Dependabot
+- Knowledge base: source list now read from the vector store instead of a
+  JSON manifest; hosted Milvus supported via `HONESTRAG_MILVUS_URI` /
+  `HONESTRAG_MILVUS_TOKEN`; page counts stored at index time
+- New `rag_service.py` shared by the Streamlit app and the new Gradio app
+- Fixes: *Clear knowledge base* crashed on Milvus Lite 3 (the store is now a
+  directory, and it was deleted as a file) - it now drops the collection;
+  the Streamlit app reloaded the 1.3 GB embedding model on every upload - it
+  is now loaded once per process
+- Deployed to a private Hugging Face Space on free ZeroGPU hardware
 
 ## Acknowledgments
 
