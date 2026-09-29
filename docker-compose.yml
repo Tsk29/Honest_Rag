@@ -1,0 +1,43 @@
+# Default (hosted LLM, e.g. Groq):
+#   cp .env.example .env   # fill in keys
+#   docker compose up --build
+#
+# Fully local LLM via Ollama:
+#   LLM_PROVIDER=ollama docker compose --profile ollama up --build
+#   docker compose exec ollama ollama pull qwen2.5:7b
+#
+# Then open http://localhost:8501
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        VERSION: ${HONESTRAG_VERSION:-dev}
+    image: ${HONESTRAG_IMAGE:-honestrag:local}
+    ports:
+      - "${HONESTRAG_PORT:-8501}:8501"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      # Inside the compose network Ollama is reachable by service name, not localhost.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    volumes:
+      # Milvus Lite DB, knowledge-base manifest and the ~1.3 GB FastEmbed model
+      # cache. Survives `docker compose down` and image rebuilds; removed only
+      # by `docker compose down -v`.
+      - honestrag-data:/data
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  honestrag-data:
+  ollama-models:

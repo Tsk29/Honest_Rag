@@ -1,0 +1,29 @@
+# Keep the build context small and never bake secrets or local state into
+# the image. Everything the image needs is copied explicitly in Dockerfile.
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[oc]
+.pytest_cache
+.ruff_cache
+
+# secrets
+.env
+*.env
+!.env.example
+
+# local runtime state (lives in the /data volume inside the container)
+milvus_demo.db
+milvus_demo_docs.json
+hf_cache
+data
+
+# not part of the container
+tests
+start_server.py
+.beamignore
+*.md
+!README.md
+.DS_Store

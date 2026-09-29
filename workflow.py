@@ -1,4 +1,3 @@
-import os
 from typing import Optional, Any
 import re
 import asyncio
@@ -11,8 +10,6 @@ from llama_index.core.workflow import (
     Workflow,
     Context,
 )
-from llama_index.core import SummaryIndex
-from llama_index.core.schema import Document
 from llama_index.core.prompts import PromptTemplate
 from llm_provider import build_llm
 from llama_index.core.llms import LLM
@@ -213,7 +210,7 @@ class CorrectiveRAGWorkflow(Workflow):
             relevancy = await self.llm.acomplete(prompt)
             print(f"DEBUG: Node {i} relevancy: {relevancy.text}")
             return relevancy.text.lower().strip()
-        except Exception as e:
+        except Exception:
             try:
                 # Fallback to synchronous call if async is not supported
                 relevancy = self.llm.complete(prompt)
@@ -341,7 +338,7 @@ class CorrectiveRAGWorkflow(Workflow):
         try:
             result = await self.llm.acomplete(prompt)
             transformed_query_str = result.text
-        except Exception as e:
+        except Exception:
             # Fallback to synchronous call if async is not supported
             result = self.llm.complete(prompt)
             transformed_query_str = result.text

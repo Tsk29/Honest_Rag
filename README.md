@@ -99,22 +99,32 @@ relevance-grader evaluation harness, and a NotebookLM-inspired UI.*
   [Ollama](https://ollama.com/) instance if you'd rather not use an API key
   at all - see [Choosing an LLM provider](#choosing-an-llm-provider)
 
+> Just want to run it? Skip to [Running with Docker](#running-with-docker).
+
 ### 1. Install dependencies
 
-An isolated virtual environment is recommended - this project's dependency
-tree (LlamaIndex + several integration packages) is picky about version
-pinning:
+`pyproject.toml` declares the dependencies and `uv.lock` pins every
+transitive version - the same lockfile Docker and CI install from, so local,
+CI and container environments are identical:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+uv sync --all-extras          # .venv with app, dev tools and the Gradio UI
+```
+
+Or with plain pip (`requirements.txt` is exported from `uv.lock`):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install llama-index-vector-stores-milvus llama-index-llms-groq
 ```
 
 ### 2. Configure environment variables
 
-Create a `.env` file in the project root:
+```bash
+cp .env.example .env
+```
+
+Then fill in at least:
 
 ```bash
 FIRECRAWL_API_KEY="your_firecrawl_api_key_here"
@@ -165,19 +175,160 @@ streamlit run app.py
 Open the local URL Streamlit prints (default `http://localhost:8501`), add a
 PDF or two in the Sources panel, and start asking questions.
 
+## Running with Docker
+
+```bash
+cp .env.example .env          # add FIRECRAWL_API_KEY + GROQ_API_KEY
+docker compose up --build
+```
+
+Open `http://localhost:8501`. The vector store lives in the `honestrag-data`
+volume (mounted at `/data`), so your knowledge base survives restarts and
+image rebuilds; `docker compose down -v` wipes it. The ~1.3 GB embedding
+model is baked into the image, so uploads work immediately with no download.
+
+Fully local, no LLM API key - adds an Ollama container:
+
+```bash
+LLM_PROVIDER=ollama docker compose --profile ollama up --build -d
+docker compose exec ollama ollama pull qwen2.5-coder:1.5b
+```
+
+Or run a released image without cloning the repo:
+
+```bash
+docker run -p 8501:8501 --env-file .env -v honestrag-data:/data ghcr.io/tsk29/honestrag:latest
+```
+
+**Image details:** two-stage build (dependencies installed from `uv.lock` and
+the embedding model downloaded in a builder stage; only the venv, model and
+source copied into a slim runtime - about 3.5 GB, most of it the model), runs as
+a non-root user, `HEALTHCHECK` on Streamlit's `/_stcore/health`, OCI labels
+carrying the version and git SHA, and secrets are only ever injected at
+runtime - `.env` is excluded from the build context.
+
+## Testing
+
+```bash
+uv run pytest                          # unit + workflow tests
+uv run ruff check .                    # lint
+uv run python eval/run_eval.py --mock  # eval-harness smoke test
+```
+
+No test calls a real LLM, Firecrawl or a hosted Milvus (the knowledge-base
+tests use a throwaway embedded Milvus Lite file). `tests/conftest.py` provides a
+scripted fake LLM that answers each of the workflow's prompts (grader, query
+rewrite, answer, critique) deterministically, so the whole
+`CorrectiveRAGWorkflow` can be run end to end in CI without API keys - covering
+the relevance-threshold routing (local vs. web fallback), token streaming,
+source attribution, the self-critique verdict, and failure fallbacks.
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every push to `main`, every pull request,
+and every version tag:
+
+| Stage | Runs on | What it does |
+|---|---|---|
+| **lint** | everything | `uv lock --check` (lockfile matches `pyproject.toml`) and `ruff check` |
+| **test** | everything | pytest on Python 3.11 and 3.12 from the locked environment, eval harness in mock mode, JUnit report uploaded as an artifact |
+| **docker** | everything | builds the image; checks all dependencies import, the baked embedding model loads with networking disabled, and the container boots healthy as a non-root user |
+| **publish** | `vX.Y.Z` tags | checks the tag matches `pyproject.toml`'s version, pushes `X.Y.Z`, `X.Y` and `latest` (linux/amd64) to GHCR |
+| **release** | `vX.Y.Z` tags | creates a GitHub Release with auto-generated notes |
+| **deploy** | `vX.Y.Z` tags | pushes the Gradio app at that tag to the Hugging Face Space and waits until it is running ([`deploy.yml`](.github/workflows/deploy.yml)) |
+
+`main` is always verified but only a tag ships. Dependabot opens monthly
+update PRs for Python packages, GitHub Actions and the base image, each of
+which goes through the same pipeline.
+
+Cutting a release:
+
+```bash
+# bump `version` in pyproject.toml, commit, then:
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+## Deployment (free)
+
+The live app runs on a **Hugging Face Space** (free CPU hardware, Gradio UI)
+with the vector store on **Zilliz Cloud's free tier** (hosted Milvus), for
+$0/month.
+
+```
+git tag vX.Y.Z → CI: lint, tests, Docker build ─→ deploy.yml pushes the Gradio app → HF Space
+                                                                                      │
+                                                  Groq · Firecrawl ◄───────────────────┼──► Zilliz Cloud (vectors)
+```
+
+- **Two UIs, one pipeline.** Free Spaces host Gradio apps but not Docker
+  ones, so the Space runs `gradio_app.py`; local and Docker use keep the
+  Streamlit UI (`app.py`). Both call the same `rag_service.py` for indexing
+  and the same `workflow.py` for answering, so they can't drift apart in
+  behaviour - only the presentation differs.
+- **Tested versions only.** The Space's `requirements.txt` is exported from
+  `uv.lock` at deploy time, and its Gradio version is pinned to the same
+  one, so production installs exactly what CI tested.
+- **Same code, different config.** Locally the vector store is an embedded
+  Milvus Lite file; in production `HONESTRAG_MILVUS_URI` /
+  `HONESTRAG_MILVUS_TOKEN` point at Zilliz Cloud. That's what lets uploads
+  survive the Space restarting or sleeping, with no paid persistent disk.
+  The Sources list is read from the vector store itself
+  (`knowledge_base.py`), so there is no local state to lose.
+- **Rollback:** Actions → *Deploy* → *Run workflow* with an earlier tag.
+
+Run the Gradio UI locally:
+
+```bash
+uv sync --all-extras
+uv run python gradio_app.py        # http://localhost:7860
+```
+
+### One-time setup
+
+1. **Zilliz Cloud** (free): create a free cluster; copy its public endpoint
+   and API key.
+2. **Hugging Face** (free): create a new Space with SDK **Gradio** (Blank
+   template), hardware **CPU basic**, visibility **Private**. In its
+   *Settings → Variables and secrets*, add the secrets `GROQ_API_KEY`,
+   `FIRECRAWL_API_KEY`, `HONESTRAG_MILVUS_URI`, `HONESTRAG_MILVUS_TOKEN`.
+   Create an access token with **write** permission.
+3. **GitHub repo** → *Settings → Secrets and variables → Actions*: add the
+   secret `HF_TOKEN` (that token) and the variable `HF_SPACE`
+   (e.g. `tsk29/honestrag`).
+4. Push a tag (see *Cutting a release*). The deploy job replaces the Space's
+   placeholder files and waits until it reports `RUNNING`.
+
+Keep the Space **private**: the app has no login, so a public URL would let
+anyone spend your Groq/Firecrawl quota and see every uploaded document (all
+visitors share one knowledge base). Free Spaces sleep after ~48 h without
+visitors and take about a minute to wake; the knowledge base is unaffected.
+The first question after a restart also downloads the embedding model
+(~1.3 GB, fast from inside Hugging Face).
+
 ## Project Structure
 
 ```
 Honestrag/
-├── app.py                 # Streamlit UI: sources panel, chat, streaming
+├── app.py                 # Streamlit UI (local / Docker): sources panel, chat, streaming
 ├── workflow.py             # CorrectiveRAGWorkflow: retrieve/grade/search/answer/critique
 ├── llm_provider.py          # Shared LLM factory (Groq / Ollama / OpenAI)
+├── gradio_app.py            # Gradio UI - what the Hugging Face Space runs
+├── rag_service.py           # Indexing + workflow wiring shared by both UIs
+├── knowledge_base.py        # Milvus connection (Lite file or Zilliz) + source list
 ├── eval/
 │   ├── dataset.jsonl        # Labeled examples for the relevance grader
 │   └── run_eval.py          # Precision/recall/F1 harness for the grader
+├── tests/                   # Offline pytest suite (fake LLM, no API keys)
+├── Dockerfile               # Multi-stage, non-root, healthchecked image
+├── docker-compose.yml       # App + optional local Ollama, persistent volume
+├── .github/workflows/
+│   ├── ci.yml               # Lint -> test -> build/smoke -> publish -> release -> deploy
+│   └── deploy.yml           # Deploy (or roll back) a release tag to the HF Space
+├── pyproject.toml / uv.lock # Dependencies (source of truth) + exact pins
+├── requirements.txt         # pip-compatible export of uv.lock
+├── .env.example             # Every supported environment variable
 ├── start_server.py          # Optional Beam Cloud deployment (unmodified from
 │                             #   upstream; not part of the local Groq setup above)
-├── requirements.txt
 └── assets/architecture.svg   # Pipeline diagram used in this README
 ```
 
@@ -194,7 +345,10 @@ Honestrag/
   each answer; see `_critique_answer()` in `workflow.py` to disable or adjust
   its prompt
 - **Embedding model**: FastEmbed, `BAAI/bge-large-en-v1.5` by default
-- **Vector store location**: `./milvus_demo.db` (gitignored - local only)
+- **Vector store**: `HONESTRAG_MILVUS_URI` / `HONESTRAG_MILVUS_TOKEN` - unset means a local
+  Milvus Lite file; set them to use a hosted Milvus such as Zilliz Cloud
+- **Data location**: `HONESTRAG_DATA_DIR` (default `.`; `/data` in Docker)
+  holds the local `milvus_demo.db` and `hf_cache/` - gitignored, local only
 
 ## Troubleshooting
 
@@ -203,11 +357,11 @@ Honestrag/
    startup)
 2. **`GROQ_MODEL` not found / deprecated** - check
    `https://api.groq.com/openai/v1/models` for the current live model list
-3. **`ModuleNotFoundError: llama_index.vector_stores.milvus`** - this package
-   isn't in `requirements.txt` (a gap inherited from the upstream repo);
-   install it explicitly as shown in Setup step 1
-4. **Vector store looking stale or corrupted** - delete `milvus_demo.db` and
-   `milvus_demo_docs.json`, then re-upload your documents
+3. **`ModuleNotFoundError`** - reinstall from the lockfile (`uv sync`, or
+   `pip install -r requirements.txt`); both now include every package the
+   app imports
+4. **Vector store looking stale or corrupted** - use *Danger zone → Clear
+   knowledge base* in the app, then re-upload your documents
 
 ## Evaluation
 
