@@ -101,19 +101,42 @@ GitHub Actions CI/CD pipeline, and deployed to a Hugging Face Space.*
 
 ![HonestRAG pipeline: user query flows through retrieve, concurrent relevance grading, a threshold decision that either trusts local context or triggers a Firecrawl web search, streamed answer generation, a self-critique pass, and a cited answer](assets/architecture.svg)
 
+## Architecture
+
+![HonestRAG system architecture: a Streamlit UI (local and Docker) and a Gradio UI (Hugging Face Space) share rag_service.py, which indexes documents and builds the CorrectiveRAGWorkflow; the workflow calls the LLM (Groq, Ollama or OpenAI), Firecrawl for web fallback, and Milvus for retrieval; Milvus is a local Milvus Lite file or Zilliz Cloud. Below, the delivery pipeline: every push runs lint, tests and Docker smoke tests in GitHub Actions; a version tag publishes a GHCR image, a GitHub Release, and deploys the Gradio app to the Hugging Face Space](assets/system-architecture.svg)
+
+- **Two UIs, one core.** `app.py` (Streamlit) and `gradio_app.py` (Gradio)
+  are thin presentation layers. Indexing and workflow construction live in
+  `rag_service.py`, the CRAG logic in `workflow.py`, so both UIs behave
+  identically.
+- **Configuration, not code, picks the backends.** `LLM_PROVIDER` selects
+  Groq / Ollama / OpenAI (`llm_provider.py`); `HONESTRAG_MILVUS_URI` selects a
+  local Milvus Lite file or a hosted Zilliz Cloud cluster (`knowledge_base.py`).
+- **The vector store is the single source of truth** - the Sources list is
+  read back from the stored chunks' metadata, so there's no side file to drift
+  out of sync.
+- **Every change is verified before it can ship** - lint, tests and Docker
+  boot checks on each push; only a version tag publishes and deploys.
+
 ## Tech Stack
 
 | Layer | Choice |
 |---|---|
-| RAG framework | [LlamaIndex](https://github.com/run-llama/llama_index) (Workflow-based orchestration) |
-| LLM | [Groq](https://groq.com/) by default; [Ollama](https://ollama.com/) (local) or OpenAI via `LLM_PROVIDER` |
-| Web search | [Firecrawl](https://firecrawl.dev/) |
-| Vector store | [Milvus](https://milvus.io/) - Milvus Lite (local file) or [Zilliz Cloud](https://zilliz.com/cloud) (hosted) |
-| Embeddings | [FastEmbed](https://github.com/qdrant/fastembed) (`BAAI/bge-large-en-v1.5`) |
-| UI | [Streamlit](https://streamlit.io/) (local / Docker), [Gradio](https://www.gradio.app/) (Hugging Face Space) |
-| Packaging | [uv](https://docs.astral.sh/uv/) lockfile, Docker, Docker Compose |
-| CI/CD | GitHub Actions, GitHub Container Registry, Dependabot |
-| Hosting | [Hugging Face Spaces](https://huggingface.co/spaces) (free ZeroGPU hardware) |
+| Language | Python 3.11 / 3.12 |
+| RAG framework | [LlamaIndex](https://github.com/run-llama/llama_index) 0.13 - Workflow-based orchestration (`CorrectiveRAGWorkflow`) |
+| LLM | [Groq](https://groq.com/) (`openai/gpt-oss-120b`) by default; [Ollama](https://ollama.com/) (local) or [OpenAI](https://platform.openai.com/) via `LLM_PROVIDER` |
+| Web search | [Firecrawl](https://firecrawl.dev/) search API |
+| Embeddings | [FastEmbed](https://github.com/qdrant/fastembed) - `BAAI/bge-large-en-v1.5` (1024-dim, ONNX on CPU) |
+| Vector store | [Milvus](https://milvus.io/) - Milvus Lite (embedded file) or [Zilliz Cloud](https://zilliz.com/cloud) (hosted), via `pymilvus` |
+| Document parsing | LlamaIndex `SimpleDirectoryReader` + `pypdf` |
+| UI | [Streamlit](https://streamlit.io/) (local / Docker) · [Gradio](https://www.gradio.app/) 6 (Hugging Face Space) |
+| Dependency management | [uv](https://docs.astral.sh/uv/) - `pyproject.toml` + `uv.lock`; `requirements.txt` exported from the lock |
+| Testing | [pytest](https://pytest.org/) + pytest-asyncio - scripted fake LLM, mock embeddings, real Milvus Lite |
+| Linting | [Ruff](https://docs.astral.sh/ruff/) · [actionlint](https://github.com/rhysd/actionlint) for workflows |
+| Containers | [Docker](https://www.docker.com/) (multi-stage, `python:3.11-slim`, non-root, healthcheck) · Docker Compose |
+| CI/CD | [GitHub Actions](https://github.com/features/actions) · GitHub Container Registry · GitHub Releases · Dependabot |
+| Hosting | [Hugging Face Spaces](https://huggingface.co/spaces) - Gradio SDK on free ZeroGPU hardware |
+| Evaluation | Custom harness (`eval/`) - precision / recall / F1 of the relevance grader on a labeled set |
 
 ## Setup and Installation
 
@@ -366,7 +389,9 @@ Honestrag/
 ├── .env.example             # Every supported environment variable
 ├── start_server.py          # Optional Beam Cloud deployment (unmodified from
 │                             #   upstream; not part of the local Groq setup above)
-└── assets/architecture.svg   # Pipeline diagram used in this README
+└── assets/
+    ├── architecture.svg        # CRAG pipeline diagram
+    └── system-architecture.svg # Components + CI/CD delivery diagram
 ```
 
 ## Configuration

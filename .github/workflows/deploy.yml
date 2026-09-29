@@ -60,8 +60,9 @@ jobs:
 
       - name: Assemble Space
         run: |
-          mkdir space
+          mkdir -p space/assets
           cp gradio_app.py rag_service.py knowledge_base.py workflow.py llm_provider.py space/
+          cp assets/architecture.svg assets/system-architecture.svg space/assets/
           uv export --frozen --no-dev --no-hashes --no-emit-project --extra space -o space/requirements.txt
           gradio_version=$(grep -m1 '^gradio==' space/requirements.txt | cut -d= -f3)
           [ -n "$gradio_version" ] || { echo "::error::gradio missing from the lockfile export"; exit 1; }
@@ -80,7 +81,22 @@ jobs:
           short_description: Corrective RAG that fact-checks its own answers
           ---
 
-          Deployed automatically from [Tsk29/Honest_Rag](https://github.com/Tsk29/Honest_Rag) at \`${REF}\`.
+          # HonestRAG
+
+          A Corrective RAG system that grades the relevance of what it retrieves from
+          your PDFs, falls back to a live web search when retrieval isn't good enough,
+          and fact-checks its own answer - with the exact source snippet behind every
+          claim one click away.
+
+          **How to use:** add PDFs in the *Sources* panel, then ask a question. Each
+          answer shows a "Claims checked" verdict and expandable citations.
+
+          ![CRAG pipeline](assets/architecture.svg)
+
+          ![System architecture and delivery pipeline](assets/system-architecture.svg)
+
+          Source code, tests and CI/CD: [Tsk29/Honest_Rag](https://github.com/Tsk29/Honest_Rag).
+          Deployed from \`${REF}\` by GitHub Actions.
           EOF
           ls -la space && cat space/README.md
 
