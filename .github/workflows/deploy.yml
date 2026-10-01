@@ -1,0 +1,128 @@
+# Deploy a release to the Hugging Face Space (Gradio UI, free CPU hardware).
+#
+# Runs automatically at the end of ci.yml for every vX.Y.Z tag, after tests
+# and the Docker build have passed. Can also be run by hand
+# (Actions -> Deploy -> Run workflow) with an earlier tag to roll back.
+#
+# The Space receives only what the Gradio app needs: its Python modules, a
+# requirements.txt exported from uv.lock (so the Space installs exactly the
+# versions CI tested), and a README whose front matter is the Space config.
+#
+# Needs:
+#   repo variable  HF_SPACE  e.g. "tsk29/honestrag"
+#   repo secret    HF_TOKEN  Hugging Face token with write access
+# App secrets (GROQ_API_KEY, FIRECRAWL_API_KEY, HONESTRAG_MILVUS_URI,
+# HONESTRAG_MILVUS_TOKEN) are set on the Space itself, never here.
+
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Release tag to deploy, e.g. v0.1.0"
+        type: string
+        required: true
+
+concurrency:
+  group: deploy-hf-space
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://huggingface.co/spaces/${{ vars.HF_SPACE }}
+    env:
+      HF_SPACE: ${{ vars.HF_SPACE }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      REF: ${{ inputs.ref }}
+    steps:
+      - name: Check configuration
+        run: |
+          [ -n "$HF_SPACE" ] || { echo "::error::Set the HF_SPACE repository variable"; exit 1; }
+          [ -n "$HF_TOKEN" ] || { echo "::error::Set the HF_TOKEN repository secret"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Assemble Space
+        run: |
+          mkdir -p space/assets
+          cp gradio_app.py rag_service.py knowledge_base.py workflow.py llm_provider.py space/
+          cp assets/architecture.svg assets/system-architecture.svg space/assets/
+          uv export --frozen --no-dev --no-hashes --no-emit-project --extra space -o space/requirements.txt
+          gradio_version=$(grep -m1 '^gradio==' space/requirements.txt | cut -d= -f3)
+          [ -n "$gradio_version" ] || { echo "::error::gradio missing from the lockfile export"; exit 1; }
+
+          cat > space/README.md <<EOF
+          ---
+          title: HonestRAG
+          emoji: 📓
+          colorFrom: gray
+          colorTo: blue
+          sdk: gradio
+          sdk_version: ${gradio_version}
+          python_version: "3.12.12"  # ZeroGPU (free Gradio hardware) supports 3.10.13 / 3.12.12
+          app_file: gradio_app.py
+          pinned: false
+          short_description: Corrective RAG that fact-checks its own answers
+          ---
+
+          # HonestRAG
+
+          A Corrective RAG system that grades the relevance of what it retrieves from
+          your PDFs, falls back to a live web search when retrieval isn't good enough,
+          and fact-checks its own answer - with the exact source snippet behind every
+          claim one click away.
+
+          **How to use:** add PDFs in the *Sources* panel, then ask a question. Each
+          answer shows a "Claims checked" verdict and expandable citations.
+
+          ![CRAG pipeline](assets/architecture.svg)
+
+          ![System architecture and delivery pipeline](assets/system-architecture.svg)
+
+          Source code, tests and CI/CD: [Tsk29/Honest_Rag](https://github.com/Tsk29/Honest_Rag).
+          Deployed from \`${REF}\` by GitHub Actions.
+          EOF
+          ls -la space && cat space/README.md
+
+      - name: Push to the Space
+        working-directory: space
+        run: |
+          git init -q -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add . && git commit -qm "Deploy ${REF}"
+          # The Space repo only ever holds these generated files, so each
+          # deploy replaces it wholesale; the history that matters is in GitHub.
+          git push -q --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" main
+
+      - name: Wait until the Space is running
+        run: |
+          sleep 20  # let the Space register the new commit before polling
+          for i in $(seq 1 90); do
+            stage=$(curl -fsS -H "Authorization: Bearer $HF_TOKEN" \
+              "https://huggingface.co/api/spaces/${HF_SPACE}/runtime" | jq -r .stage)
+            echo "stage: $stage"
+            case "$stage" in
+              RUNNING) exit 0 ;;
+              BUILD_ERROR|RUNTIME_ERROR|CONFIG_ERROR|NO_APP_FILE)
+                echo "::error::Space failed to start ($stage) - check its logs on huggingface.co"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for the Space to start"; exit 1

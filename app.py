@@ -1,35 +1,26 @@
 from contextlib import redirect_stdout
 import io
-from workflow import CorrectiveRAGWorkflow, TokenEvent
+from workflow import TokenEvent
 from llama_index.core import Settings
-from llama_index.embeddings.fastembed import FastEmbedEmbedding
-from llama_index.vector_stores.milvus import MilvusVectorStore
-from llama_index.core import StorageContext
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
 from llm_provider import build_llm
+import knowledge_base as kb
+import rag_service
 import uuid
 import tempfile
 import gc
-import json
-import qdrant_client
 import streamlit as st
 import asyncio
 import os
-import sys
-import logging
 from dotenv import load_dotenv
 import nest_asyncio
 nest_asyncio.apply()
 
 load_dotenv()
 
-# The Milvus Lite database is a single local file, and the knowledge base
-# manifest tracks which original filenames have been indexed into it. Both
-# live next to the app so that the knowledge base survives across Streamlit
-# restarts, not just across reruns within one session.
-MILVUS_URI = "./milvus_demo.db"
-MILVUS_COLLECTION = "firecrawl_agent_docs"
-KB_MANIFEST_PATH = "./milvus_demo_docs.json"
+# Where the vectors live (a local Milvus Lite file, or a hosted Milvus such as
+# Zilliz Cloud) is configured by HONESTRAG_MILVUS_URI / HONESTRAG_MILVUS_TOKEN - see
+# knowledge_base.py. Indexing and workflow construction are shared with the
+# Gradio app - see rag_service.py.
 
 
 # Set up page configuration
@@ -225,42 +216,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def load_indexed_docs():
-    """Read the metadata (name, size, page count) of every source already
-    indexed into the persistent Milvus store, so the sidebar can show the
-    real knowledge base contents even after an app restart.
-
-    Each entry is `{"name": ..., "size_kb": ..., "pages": ...}`. Older
-    manifests written before size/page tracking existed are just a list of
-    filenames - those are upgraded in place to the dict form with unknown
-    size/pages, rather than discarded.
-    """
-    if os.path.exists(KB_MANIFEST_PATH):
-        try:
-            with open(KB_MANIFEST_PATH, "r") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return []
-        return [
-            entry if isinstance(entry, dict) else {"name": entry, "size_kb": None, "pages": None}
-            for entry in raw
-        ]
-    return []
+@st.cache_resource
+def get_kb_client():
+    return kb.make_client()
 
 
-def save_indexed_docs(docs):
-    with open(KB_MANIFEST_PATH, "w") as f:
-        json.dump(docs, f)
+def refresh_indexed_docs():
+    """Re-read the source list (name, size, page count) from the vector
+    store itself - the single source of truth - so the sidebar reflects what
+    is really indexed, including documents from earlier runs."""
+    st.session_state.indexed_docs = kb.list_sources(get_kb_client())
 
 
 def clear_knowledge_base():
-    """Explicit, opt-in destructive reset. Wipes the persistent Milvus store
-    and the filename manifest, and drops any workflow/index currently held in
-    memory. This is the only place allowed to delete indexed documents."""
-    if os.path.exists(MILVUS_URI):
-        os.remove(MILVUS_URI)
-    if os.path.exists(KB_MANIFEST_PATH):
-        os.remove(KB_MANIFEST_PATH)
+    """Explicit, opt-in destructive reset. Drops the whole collection and any
+    workflow/index currently held in memory. This is the only place allowed
+    to delete every indexed document."""
+    kb.clear(get_kb_client())
 
     st.session_state.workflow = None
     st.session_state.indexed_docs = []
@@ -277,9 +249,14 @@ if "workflow" not in st.session_state:
     st.session_state.workflow = None
 
 if "indexed_docs" not in st.session_state:
-    # Bootstrapped from disk so a restarted session immediately knows what's
-    # already in the knowledge base, instead of assuming it's empty.
-    st.session_state.indexed_docs = load_indexed_docs()
+    # Bootstrapped from the vector store so a restarted session immediately
+    # knows what's already in the knowledge base, instead of assuming it's
+    # empty.
+    try:
+        refresh_indexed_docs()
+    except Exception as e:
+        st.session_state.indexed_docs = []
+        st.warning(f"Could not connect to the knowledge base: {e}")
 
 if "uploader_key" not in st.session_state:
     # Bumped whenever a source is removed (individually or via "Clear
@@ -311,44 +288,17 @@ def reset_chat():
     gc.collect()
 
 
-# Functions to build/update the workflow against the persistent Milvus store
-#
-# NOTE on `overwrite`: MilvusVectorStore only drops the collection when
-# `overwrite=True` AND the collection already exists. When it doesn't exist
-# yet, a fresh one is created regardless of `overwrite`. So passing
-# `overwrite=False` here is enough to get "create on first use, reuse after
-# that" for free - the collection, and therefore every previously uploaded
-# document's embeddings, survives every subsequent call.
-#
-# NOTE on retrieval scope: `VectorStoreIndex.from_documents(...)` builds an
-# `index_struct` that only contains the nodes passed to *that* call. Calling
-# `.as_retriever()` on that specific index object restricts search to just
-# those nodes (via a node_ids filter), which would silently limit answers to
-# only the most recently uploaded document. To search across everything ever
-# indexed, the workflow is handed an index built with
-# `VectorStoreIndex.from_vector_store(...)` instead, which has an empty
-# node_ids restriction and therefore queries the full Milvus collection.
+@st.cache_resource
+def load_embed_model():
+    # Loading the ~1.3 GB embedding model is slow; do it once per process,
+    # not on every upload.
+    return rag_service.build_embed_model()
 
 
 def _build_settings_and_store():
-    vector_store = MilvusVectorStore(
-        uri=MILVUS_URI,
-        collection_name=MILVUS_COLLECTION,
-        dim=1024,
-        overwrite=False,
-    )
+    vector_store = rag_service.open_vector_store()
 
-    # MilvusVectorStore only calls load_collection() itself when it creates a
-    # brand-new collection (see its constructor) or when collection_properties
-    # are passed - neither applies here. Every fresh connection to an
-    # *existing* collection (e.g. resuming a session, or Milvus Lite's
-    # embedded server restarting) otherwise starts the collection in
-    # "released" state, and any search/query against it fails with
-    # "Collection ... is in state 'released'; call load() before search".
-    if MILVUS_COLLECTION in vector_store.client.list_collections():
-        vector_store.client.load_collection(MILVUS_COLLECTION)
-
-    embed_model = FastEmbedEmbedding(model_name="BAAI/bge-large-en-v1.5", cache_dir="./hf_cache")
+    embed_model = load_embed_model()
     Settings.embed_model = embed_model
 
     llm = load_llm()
@@ -357,82 +307,24 @@ def _build_settings_and_store():
     return vector_store, embed_model, llm
 
 
-def _build_workflow(index, llm):
-    if "FIRECRAWL_API_KEY" not in os.environ:
-        raise ValueError("FireCrawl API key not found. Please enter it in the sidebar.")
-
-    workflow = CorrectiveRAGWorkflow(
-        index=index,
-        firecrawl_api_key=os.environ["FIRECRAWL_API_KEY"],
-        verbose=True,
-        timeout=249,  # Increased timeout to match workflow execution
-        llm=llm
-    )
-    print("DEBUG: Workflow created")
-    return workflow
-
-
-def add_documents_to_index(file_path, new_file_sizes):
+def add_documents_to_index(file_path):
     """Embed and insert the documents found under `file_path` into the
     persistent knowledge base, then rebuild the workflow so it can retrieve
     across every document indexed so far (not just this batch).
-
-    `new_file_sizes` is `{filename: size_in_bytes}` for the files just
-    written to `file_path`, used only to enrich the sidebar's source list.
     """
     try:
         with st.spinner("Loading documents and updating the knowledge base..."):
-            documents = SimpleDirectoryReader(file_path).load_data()
+            documents = rag_service.load_documents(file_path)
             print(f"DEBUG: Loaded {len(documents)} documents")
 
-            # SimpleDirectoryReader derives each Document's doc_id from the
-            # temp upload path, which is deleted right after this call -
-            # useless for referencing a specific source later (e.g. to
-            # remove it). Overwriting it with the original filename gives
-            # every node from this file a stable, human-meaningful
-            # ref_doc_id that `remove_document()` can target directly.
-            # A single PDF commonly loads as one Document per page, so this
-            # also doubles as a page count per file.
-            page_counts: dict[str, int] = {}
-            for i, doc in enumerate(documents):
-                print(f"DEBUG: Document {i} preview: {doc.text[:100]}...")
-                original_name = doc.metadata.get("file_name", "")
-                if original_name:
-                    doc.doc_id = original_name
-                    page_counts[original_name] = page_counts.get(original_name, 0) + 1
-
             vector_store, embed_model, llm = _build_settings_and_store()
-            print("DEBUG: Milvus vector store ready (persistent, not overwritten)")
-
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            print("DEBUG: Storage context created")
-
-            # Embeds and inserts the new documents' nodes into the existing
-            # (or freshly created) Milvus collection. The returned index
-            # object is intentionally not used for retrieval - see note above.
-            VectorStoreIndex.from_documents(
-                documents,
-                storage_context=storage_context,
-            )
+            rag_service.index_documents(documents, vector_store, embed_model)
             print("DEBUG: New documents inserted into the persistent index")
 
-            # Rebuilt from the vector store so retrieval spans the whole
-            # accumulated knowledge base, including documents from earlier
-            # uploads/sessions.
-            index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-
-            workflow = _build_workflow(index, llm)
+            workflow = rag_service.build_workflow(vector_store, embed_model, llm)
             st.session_state.workflow = workflow
 
-            existing_names = {d["name"] for d in st.session_state.indexed_docs}
-            for name, size_bytes in new_file_sizes.items():
-                if name not in existing_names:
-                    st.session_state.indexed_docs.append({
-                        "name": name,
-                        "size_kb": round(size_bytes / 1024),
-                        "pages": page_counts.get(name),
-                    })
-            save_indexed_docs(st.session_state.indexed_docs)
+            refresh_indexed_docs()
 
             return workflow
     except Exception as e:
@@ -446,12 +338,9 @@ def remove_document(name: str):
     (the original filename) `add_documents_to_index` assigns at index time.
     """
     vector_store, embed_model, llm = _build_settings_and_store()
-    vector_store.delete(ref_doc_id=name)
+    rag_service.remove_source(vector_store, name)
 
-    st.session_state.indexed_docs = [
-        d for d in st.session_state.indexed_docs if d["name"] != name
-    ]
-    save_indexed_docs(st.session_state.indexed_docs)
+    refresh_indexed_docs()
 
     # Force the file_uploader to remount empty - see the uploader_key
     # comment above - otherwise the just-removed file is still sitting in
@@ -460,8 +349,7 @@ def remove_document(name: str):
 
     if st.session_state.indexed_docs:
         try:
-            index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-            st.session_state.workflow = _build_workflow(index, llm)
+            st.session_state.workflow = rag_service.build_workflow(vector_store, embed_model, llm)
         except Exception as e:
             st.session_state.workflow = None
             st.sidebar.warning(f"Could not rebuild the workflow after removing a source: {e}")
@@ -474,8 +362,7 @@ def resume_workflow_from_existing_store():
     without requiring a new upload. Used to resume a session where the
     knowledge base already has documents from a previous run."""
     vector_store, embed_model, llm = _build_settings_and_store()
-    index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-    workflow = _build_workflow(index, llm)
+    workflow = rag_service.build_workflow(vector_store, embed_model, llm)
     st.session_state.workflow = workflow
     return workflow
 
@@ -566,7 +453,7 @@ with st.sidebar:
                             out_file.write(f.getvalue())
 
                     st.caption(f"Indexing {len(new_files)} new source(s)...")
-                    add_documents_to_index(temp_dir, {f.name: f.size for f in new_files})
+                    add_documents_to_index(temp_dir)
             except Exception as e:
                 st.error(f"An error occurred: {e}")
                 st.stop()

@@ -1,0 +1,21 @@
+# Monthly dependency-update PRs. Each one runs through the full CI pipeline
+# (tests + Docker build), so an update that breaks the app can't merge green.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      llama-index:
+        patterns: ["llama-index*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,26 +1,60 @@
 [project]
-name = "firecrawl-agent"
+name = "honestrag"
 version = "0.1.0"
-description = "Add your description here"
+description = "Corrective RAG that grades its own retrieval, falls back to web search, and fact-checks its answers."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
+# Only what app.py / workflow.py / llm_provider.py actually import. Lower
+# bounds are the versions the app is known to work with; the llama-index
+# family is capped at the next minor because it breaks APIs between minors.
+# Exact versions are pinned in uv.lock, which is what Docker and CI install.
 dependencies = [
-    "beam-client>=0.2.175",
-    "firecrawl-py>=2.4.1",
-    "ipykernel>=6.30.1",
-    "ipython>=9.2.0",
-    "litellm>=1.63.8",
-    "llama-index>=0.11.0",
-    "llama-index-embeddings-fastembed>=0.3.1",
-    "llama-index-llms-litellm>=0.5.1",
-    "llama-index-llms-lmstudio>=0.3.0",
-    "llama-index-llms-ollama>=0.6.2",
-    "llama-index-llms-openai>=0.4.7",
-    "llama-index-readers-web>=0.3.9",
-    "llama-index-vector-stores-milvus>=0.4.0",
-    "llama-index-vector-stores-qdrant>=0.6.0",
-    "lmstudio>=1.3.0",
-    "openai>=1.99.0",
-    "qdrant-client>=1.14.2",
-    "streamlit>=1.44.1",
+    "llama-index-core>=0.13.6,<0.14",
+    "llama-index-embeddings-fastembed>=0.4.0,<0.5",
+    "llama-index-vector-stores-milvus>=1.2.0,<1.3",
+    "llama-index-llms-groq>=0.4.0,<0.5",
+    "llama-index-llms-ollama>=0.7.0,<0.8",
+    "llama-index-llms-openai>=0.5.6,<0.6",
+    "llama-index-readers-file>=0.5.1,<0.6",
+    "fastembed>=0.7.1",
+    "pymilvus>=2.6.17",
+    "milvus-lite>=3.2.1; sys_platform != 'win32'",
+    "streamlit>=1.48.1",
+    "nest-asyncio>=1.6.0",
+    "python-dotenv>=1.1.1",
+    "requests>=2.32.4",
 ]
+
+[project.optional-dependencies]
+# UI for the Hugging Face Space (gradio_app.py). Kept optional so the Docker
+# image, which serves the Streamlit UI, doesn't carry it. The Space's builder
+# installs `gradio[oauth,mcp]` and `spaces` on top of our requirements.txt, so
+# they're locked here too - otherwise uv.lock can pin versions (e.g. pydantic)
+# that conflict with what the Space adds, and the Space build fails.
+space = [
+    "gradio[oauth,mcp]>=5.0",
+    "spaces>=0.51",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["start_server.py"]
+
+[tool.ruff.lint]
+# Correctness-focused rules only (pyflakes + pycodestyle errors). Style is
+# not enforced in CI yet so the existing code doesn't need a mass reformat.
+select = ["E4", "E7", "E9", "F"]
